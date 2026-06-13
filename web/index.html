@@ -180,6 +180,26 @@
             </div>
             <div class="item-progress"><div class="item-progress-fill"></div><span>等待</span></div>
           </article>
+          <article class="process-item" data-output-item="crop_type_class">
+            <label class="checkline"><input type="checkbox" class="process-output" value="crop_type_class"> 作物类型分类</label>
+            <div class="mini-grid">
+              <label>水体 NDWI 阈值<input data-param="crop_water_ndwi_min" type="number" step="0.01" value="0.18"></label>
+              <label>水体 NDVI 上限<input data-param="crop_water_ndvi_max" type="number" step="0.01" value="0.20"></label>
+              <label>疑似水稻 NDVI 下限<input data-param="crop_rice_ndvi_min" type="number" step="0.01" value="0.45"></label>
+              <label>疑似水稻 LSWI 下限<input data-param="crop_rice_lswi_min" type="number" step="0.01" value="0.10"></label>
+            </div>
+            <div class="item-progress"><div class="item-progress-fill"></div><span>等待</span></div>
+          </article>
+          <article class="process-item" data-output-item="crop_yield_estimate">
+            <label class="checkline"><input type="checkbox" class="process-output" value="crop_yield_estimate"> 作物估产</label>
+            <div class="mini-grid">
+              <label>最小估产 t/ha<input data-param="yield_min_t_ha" type="number" step="0.1" value="3.0"></label>
+              <label>最大估产 t/ha<input data-param="yield_max_t_ha" type="number" step="0.1" value="7.0"></label>
+              <label>水稻加权<input data-param="yield_rice_bonus" type="number" step="0.01" value="0.35"></label>
+              <label>冬作物加权<input data-param="yield_winter_bonus" type="number" step="0.01" value="0.15"></label>
+            </div>
+            <div class="item-progress"><div class="item-progress-fill"></div><span>等待</span></div>
+          </article>
           <article class="process-item" data-output-item="anomaly_drought">
             <label class="checkline"><input type="checkbox" class="process-output" value="anomaly_drought"> 疑似干旱</label>
             <div class="mini-grid">

@@ -407,9 +407,32 @@ async function loadLayers() {
 function addLayerControl(layer, visible) {
   const card = document.createElement("div");
   card.className = "layer-card";
-  card.innerHTML = `<label><input type="checkbox" ${visible ? "checked" : ""}> ${layer.name}</label><a href="${layer.tif}">导出 TIF</a>`;
-  const checkbox = card.querySelector("input");
-  checkbox.onchange = () => toggleLayer(layer, checkbox.checked);
+  const childHtml = (layer.children || []).map(child => `
+    <div class="layer-child" data-layer-child="${child.key}">
+      <label><input type="radio" name="layer-child-${layer.key}" value="${child.key}"> ${child.name}</label>
+      <a href="${child.tif}">导出 TIF</a>
+    </div>
+  `).join("");
+  card.innerHTML = `
+    <label><input type="checkbox" ${visible ? "checked" : ""}> ${layer.name}</label>
+    <a href="${layer.tif}">导出主结果</a>
+    ${childHtml ? `<div class="layer-children">${childHtml}</div>` : ""}
+  `;
+  const checkbox = card.querySelector("input[type='checkbox']");
+  checkbox.onchange = () => {
+    toggleLayer(layer, checkbox.checked);
+    if (!checkbox.checked) {
+      card.querySelectorAll(".layer-child input").forEach(input => { input.checked = false; });
+    }
+  };
+  card.querySelectorAll(".layer-child input").forEach(input => {
+    input.onchange = () => {
+      const child = (layer.children || []).find(item => item.key === input.value);
+      if (!child) return;
+      checkbox.checked = true;
+      toggleLayer({ ...layer, ...child }, input.checked);
+    };
+  });
   $("layerList").appendChild(card);
   if (visible) toggleLayer(layer, true);
 }
@@ -421,6 +444,12 @@ function clearOverlays() {
 }
 
 function toggleLayer(layer, visible) {
+  Object.keys(state.overlays).forEach((key) => {
+    if ((layer.children || []).some(child => child.key === key) && !visible) {
+      map.removeLayer(state.overlays[key]);
+      delete state.overlays[key];
+    }
+  });
   if (state.overlays[layer.key]) map.removeLayer(state.overlays[layer.key]);
   delete state.overlays[layer.key];
   if (!visible) {

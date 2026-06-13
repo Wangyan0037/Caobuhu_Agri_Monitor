@@ -29,6 +29,8 @@ OUTPUT_NAMES = [
     "patrol_priority",
     "vitality_index_ndvi",
     "ndvi_last_year_delta",
+    "crop_type_class",
+    "crop_yield_estimate",
     "anomaly_weak_vitality",
     "anomaly_vitality_decline",
     "anomaly_drought",
@@ -36,6 +38,13 @@ OUTPUT_NAMES = [
     "anomaly_fallow",
     "anomaly_nonagri",
 ]
+
+SUPPORT_OUTPUTS = {
+    "crop_type_class": {"vitality_index_ndvi", "ndre_index", "truecolor_rgb"},
+    "crop_yield_estimate": {"vitality_index_ndvi", "ndre_index", "truecolor_rgb"},
+}
+
+WATER_SCL_CLASSES = {6}
 
 
 @dataclass(frozen=True)
@@ -154,12 +163,16 @@ def run_local_processing(
     outputs_to_write = [name for name in (selected_outputs or OUTPUT_NAMES) if name in OUTPUT_NAMES]
     if not outputs_to_write:
         raise ValueError("No valid output products selected.")
+    extra_outputs = set()
+    for output_name in outputs_to_write:
+        extra_outputs.update(SUPPORT_OUTPUTS.get(output_name, set()))
+    outputs_to_compute = outputs_to_write + [name for name in sorted(extra_outputs) if name not in outputs_to_write]
     params = _merged_processing_params(processing_params or {})
     aoi_geometries = None
     aoi_crs = None
     if aoi_path:
         aoi_geometries, aoi_crs = _load_vector_geometries(aoi_path)
-    tile_outputs: dict[str, list[Path]] = {name: [] for name in outputs_to_write}
+    tile_outputs: dict[str, list[Path]] = {name: [] for name in outputs_to_compute}
     metadata = {
         "input_dir": str(Path(raw_safe_dir)),
         "optical_safe_dir": str(Path(raw_safe_dir)),
@@ -169,6 +182,7 @@ def run_local_processing(
         "processed_product_count": len(products),
         "selection": selection,
         "selected_outputs": outputs_to_write,
+        "computed_outputs": outputs_to_compute,
         "processing_params": params,
         "aoi_path": str(aoi_path) if aoi_path else "",
         "process_scope_path": str(process_scope_path or process_scope_dir) if (process_scope_path or process_scope_dir) else "",
@@ -195,7 +209,7 @@ def run_local_processing(
         outputs = _process_product_group(
             group,
             product_dir,
-            outputs_to_write,
+            outputs_to_compute,
             params,
             should_stop=should_stop,
             progress_callback=progress_callback,
@@ -288,6 +302,8 @@ def _process_product_group(
         byte_profile.update(driver="GTiff", dtype="uint8", count=1, nodata=NODATA_VALUE, compress="deflate", tiled=True)
         float_profile = ref.profile.copy()
         float_profile.update(driver="GTiff", dtype="float32", count=1, nodata=FLOAT_NODATA_VALUE, compress="deflate", tiled=True)
+        rgb_profile = ref.profile.copy()
+        rgb_profile.update(driver="GTiff", dtype="uint8", count=3, nodata=None, compress="deflate", tiled=True)
 
         datasets_by_product = [{band: rasterio.open(path) for band, path in item.bands.items()} for item in products]
         try:
@@ -309,10 +325,13 @@ def _process_product_group(
             writers = {}
             try:
                 for name, path in output_paths.items():
+                    profile = rgb_profile if name == "truecolor_rgb" else (
+                        float_profile if name in {"vitality_index_ndvi", "ndvi_last_year_delta", "crop_yield_estimate", "ndre_index"} else byte_profile
+                    )
                     writers[name] = rasterio.open(
                         path,
                         "w",
-                        **(float_profile if name in {"vitality_index_ndvi", "ndvi_last_year_delta"} else byte_profile),
+                        **profile,
                     )
                 windows = list(ref.block_windows(1))
                 total_windows = max(1, len(windows))
@@ -329,10 +348,17 @@ def _process_product_group(
                             invert=True,
                         )
                         for name, data in outputs.items():
-                            nodata = FLOAT_NODATA_VALUE if data.dtype.kind == "f" else NODATA_VALUE
-                            data[~inside] = nodata
+                            if data.ndim == 3:
+                                data[:, ~inside] = 0
+                            else:
+                                nodata = FLOAT_NODATA_VALUE if data.dtype.kind == "f" else NODATA_VALUE
+                                data[~inside] = nodata
                     for name in output_names:
-                        writers[name].write(outputs[name], 1, window=window)
+                        data = outputs[name]
+                        if data.ndim == 3:
+                            writers[name].write(data, window=window)
+                        else:
+                            writers[name].write(data, 1, window=window)
                     if progress_callback:
                         done_units = (product_index - 1) * total_windows + window_index
                         total_units = max(1, product_count * total_windows)
@@ -403,6 +429,22 @@ def _normalized_difference(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return result.astype("float32")
 
 
+def _enhanced_vegetation_index(nir: np.ndarray, red: np.ndarray, blue: np.ndarray) -> np.ndarray:
+    with np.errstate(divide="ignore", invalid="ignore"):
+        result = 2.5 * (nir - red) / (nir + 6.0 * red - 7.5 * blue + 1.0)
+    result[~np.isfinite(result)] = np.nan
+    return result.astype("float32")
+
+
+def _truecolor_rgb(red: np.ndarray, green: np.ndarray, blue: np.ndarray, valid: np.ndarray, reflectance_max: float) -> np.ndarray:
+    rgb = np.stack([red, green, blue], axis=0).astype("float32")
+    rgb = np.clip(rgb / max(reflectance_max, 1e-6), 0, 1)
+    rgb = np.power(rgb, 0.9)
+    rgb = (rgb * 255).astype("uint8")
+    rgb[:, ~valid] = 0
+    return rgb
+
+
 def _merged_processing_params(overrides: dict) -> dict:
     defaults = {
         "vitality_poor_ndvi": THRESHOLDS.vitality_poor_ndvi,
@@ -433,6 +475,24 @@ def _merged_processing_params(overrides: dict) -> dict:
         "resampling_method": "bilinear",
         "drought_requires_weak": True,
         "export_masks": True,
+        "crop_water_ndvi_max": 0.20,
+        "crop_water_ndwi_min": 0.18,
+        "crop_built_ndvi_max": 0.22,
+        "crop_built_ndbi_min": 0.02,
+        "crop_rice_ndvi_min": 0.45,
+        "crop_rice_lswi_min": 0.10,
+        "crop_rice_ndre_min": 0.16,
+        "crop_winter_ndvi_min": 0.28,
+        "crop_winter_ndvi_max": 0.75,
+        "crop_winter_ndre_min": 0.08,
+        "crop_winter_ndre_max": 0.22,
+        "crop_other_ndvi_min": 0.22,
+        "yield_min_t_ha": 3.0,
+        "yield_max_t_ha": 7.0,
+        "yield_rice_bonus": 0.35,
+        "yield_winter_bonus": 0.15,
+        "yield_other_bonus": 0.05,
+        "truecolor_reflectance_max": 0.30,
     }
     for key, value in overrides.items():
         if key in defaults and value not in ("", None):
@@ -460,6 +520,8 @@ def _compute_outputs(bands: dict[str, np.ndarray], scl: np.ndarray, params: dict
     ndwi = _normalized_difference(green, nir)
     lswi = _normalized_difference(nir, swir1)
     ndbi = _normalized_difference(swir1, nir)
+    ndre = _normalized_difference(nir, rededge1)
+    evi = _enhanced_vegetation_index(nir, red, blue)
 
     vitality = np.full(ndvi.shape, NODATA_VALUE, dtype="uint8")
     vitality[valid & (ndvi < params["vitality_poor_ndvi"])] = 1
@@ -495,7 +557,12 @@ def _compute_outputs(bands: dict[str, np.ndarray], scl: np.ndarray, params: dict
 
     ndvi_out = ndvi.astype("float32")
     ndvi_out[~valid] = FLOAT_NODATA_VALUE
+    ndre_out = ndre.astype("float32")
+    ndre_out[~valid] = FLOAT_NODATA_VALUE
     delta = np.full(ndvi.shape, FLOAT_NODATA_VALUE, dtype="float32")
+    crop_type = _classify_crop_type(valid, ndvi, ndwi, lswi, ndbi, ndre, scl, params)
+    crop_yield = _estimate_crop_yield(valid, crop_type, ndvi, ndre, lswi, evi, params)
+    truecolor = _truecolor_rgb(red, green, blue, valid, float(params["truecolor_reflectance_max"]))
 
     return {
         "vitality_grade": vitality,
@@ -503,7 +570,11 @@ def _compute_outputs(bands: dict[str, np.ndarray], scl: np.ndarray, params: dict
         "anomaly_combined": anomaly,
         "patrol_priority": priority,
         "vitality_index_ndvi": ndvi_out,
+        "ndre_index": ndre_out,
         "ndvi_last_year_delta": delta,
+        "crop_type_class": crop_type,
+        "crop_yield_estimate": crop_yield,
+        "truecolor_rgb": truecolor,
         "anomaly_weak_vitality": _mask(anomaly, 1, valid),
         "anomaly_vitality_decline": _placeholder_mask(valid),
         "anomaly_drought": _mask(anomaly, 3, valid),
@@ -519,6 +590,78 @@ def _scl_excluded_classes(value) -> list[int]:
     if isinstance(value, (list, tuple, set)):
         return [int(part) for part in value]
     return [0, 1, 3, 8, 9, 10, 11]
+
+
+def _classify_crop_type(
+    valid: np.ndarray,
+    ndvi: np.ndarray,
+    ndwi: np.ndarray,
+    lswi: np.ndarray,
+    ndbi: np.ndarray,
+    ndre: np.ndarray,
+    scl: np.ndarray,
+    params: dict,
+) -> np.ndarray:
+    result = np.full(ndvi.shape, NODATA_VALUE, dtype="uint8")
+    result[valid] = 2
+
+    water = valid & (
+        np.isin(scl, list(WATER_SCL_CLASSES))
+        | (((ndwi >= params["crop_water_ndwi_min"]) | (lswi >= params["crop_water_ndwi_min"])) & (ndvi <= params["crop_water_ndvi_max"]))
+    )
+    built = valid & (ndvi <= params["crop_built_ndvi_max"]) & (ndbi >= params["crop_built_ndbi_min"]) & ~water
+    rice = valid & (ndvi >= params["crop_rice_ndvi_min"]) & (lswi >= params["crop_rice_lswi_min"]) & (ndre >= params["crop_rice_ndre_min"]) & ~water & ~built
+    winter_crop = (
+        valid
+        & (ndvi >= params["crop_winter_ndvi_min"])
+        & (ndvi <= params["crop_winter_ndvi_max"])
+        & (ndre >= params["crop_winter_ndre_min"])
+        & (ndre <= params["crop_winter_ndre_max"])
+        & (lswi < params["crop_rice_lswi_min"])
+        & ~water
+        & ~built
+        & ~rice
+    )
+    other_crop = valid & (ndvi >= params["crop_other_ndvi_min"]) & ~water & ~built & ~rice & ~winter_crop
+
+    result[water] = 1
+    result[built] = 2
+    result[rice] = 3
+    result[winter_crop] = 4
+    result[other_crop] = 5
+    return result
+
+
+def _estimate_crop_yield(
+    valid: np.ndarray,
+    crop_type: np.ndarray,
+    ndvi: np.ndarray,
+    ndre: np.ndarray,
+    lswi: np.ndarray,
+    evi: np.ndarray,
+    params: dict,
+) -> np.ndarray:
+    result = np.full(ndvi.shape, FLOAT_NODATA_VALUE, dtype="float32")
+    crop_mask = valid & np.isin(crop_type, [3, 4, 5])
+    if not np.any(crop_mask):
+        return result
+
+    ndvi_score = np.clip((ndvi - 0.20) / 0.60, 0, 1)
+    ndre_score = np.clip((ndre - 0.05) / 0.30, 0, 1)
+    lswi_score = np.clip((lswi + 0.10) / 0.45, 0, 1)
+    evi_score = np.clip((evi - 0.10) / 0.70, 0, 1)
+    vigor_score = 0.45 * ndvi_score + 0.20 * ndre_score + 0.20 * lswi_score + 0.15 * evi_score
+
+    class_bonus = np.zeros(ndvi.shape, dtype="float32")
+    class_bonus[crop_type == 3] = params["yield_rice_bonus"]
+    class_bonus[crop_type == 4] = params["yield_winter_bonus"]
+    class_bonus[crop_type == 5] = params["yield_other_bonus"]
+
+    min_yield = float(params["yield_min_t_ha"])
+    max_yield = float(params["yield_max_t_ha"])
+    yield_value = min_yield + np.clip(vigor_score + class_bonus, 0, 1) * (max_yield - min_yield)
+    result[crop_mask] = yield_value[crop_mask].astype("float32")
+    return result
 
 
 def _mask(anomaly: np.ndarray, code: int, valid: np.ndarray) -> np.ndarray:

@@ -31,6 +31,7 @@ SENTINEL_DOWNLOAD_SCRIPT = APP_DIR / "download" / "S2_CDSE_download.py"
 S1_ASF_DOWNLOAD_SCRIPT = APP_DIR / "download" / "S1_ASF_auto_download.py"
 
 app = Flask(__name__, static_folder=str(STATIC_DIR), static_url_path="/static")
+DERIVED_RENDER_VERSION = "v2"
 
 JOBS: dict[str, dict] = {
     "download": {"status": "idle", "message": "等待检索", "items": [], "percent": 0, "progress_text": "未开始"},
@@ -117,10 +118,104 @@ LAYER_META = {
         "min": -0.3,
         "max": 0.3,
     },
+    "crop_type_class": {
+        "name": "作物类型分类",
+        "legend": [
+            {"kind": "note", "name": "无样本规则分类", "note": "基于 Sentinel-2 指数规则推理，适合演示和初步判读，不等同于实地样本监督分类。"},
+            {"value": 1, "name": "水体 / 鱼塘 / 沟渠", "color": "#2b83ba", "note": "高水分、低植被覆盖区域。"},
+            {"value": 2, "name": "建筑 / 道路 / 裸地 / 非植被", "color": "#bdbdbd", "note": "低 NDVI 且裸土或建设特征较强。"},
+            {"value": 3, "name": "疑似水稻 / 早夏稻田", "color": "#1a9850", "note": "高 NDVI、较高 LSWI 与红边活力特征。"},
+            {"value": 4, "name": "春季油菜 / 小麦等冬作物 / 轮作田", "color": "#fee08b", "note": "中等偏高植被覆盖，水分低于稻田。"},
+            {"value": 5, "name": "其他作物 / 其他植被", "color": "#66bd63", "note": "其余植被覆盖区域。"},
+        ],
+        "type": "class",
+        "colors": {1: (43, 131, 186, 220), 2: (189, 189, 189, 210), 3: (26, 152, 80, 220), 4: (254, 224, 139, 220), 5: (102, 189, 99, 215)},
+    },
+    "crop_yield_estimate": {
+        "name": "作物估产",
+        "legend": [
+            {"kind": "note", "name": "演示型估产", "note": "这是基于光学指数融合的空间差异演示值，单位 t/ha，不是实测产量。"},
+            {"value": 1, "name": "低产区 3-4.5 t/ha", "color": "#d73027", "note": "相对产量潜力较低。"},
+            {"value": 2, "name": "中产区 4.5-5.8 t/ha", "color": "#fee08b", "note": "中等产量潜力。"},
+            {"value": 3, "name": "高产区 5.8-7.0 t/ha", "color": "#1a9850", "note": "相对产量潜力较高。"},
+        ],
+        "type": "gradient",
+        "min": 3.0,
+        "max": 7.0,
+        "gradient_low": (215, 48, 39),
+        "gradient_high": (26, 152, 80),
+    },
     "anomaly_drought": {"name": "疑似干旱", "legend": [{"value": 1, "name": "NDWI ≤ -0.15", "color": "#a6611a", "note": "低水分指数，可能导致长势下降。"}], "type": "class", "colors": {1: (166, 97, 26, 215)}},
     "anomaly_waterlogging": {"name": "疑似积水", "legend": [{"value": 1, "name": "NDWI ≥ 0.30 或 LSWI ≥ 0.40", "color": "#2166ac", "note": "水分指数异常偏高，需关注排涝。"}], "type": "class", "colors": {1: (33, 102, 172, 215)}},
     "anomaly_fallow": {"name": "疑似撂荒", "legend": [{"value": 1, "name": "NDVI ≤ 0.35 且 NDBI ≥ 0.05", "color": "#bdbdbd", "note": "长期低植被活力或裸土特征明显。"}], "type": "class", "colors": {1: (189, 189, 189, 210)}},
     "anomaly_nonagri": {"name": "疑似非农化", "legend": [{"value": 1, "name": "NDVI ≤ 0.30 且 NDBI增强", "color": "#d7191c", "note": "植被下降并出现建设/裸土增强信号。"}], "type": "class", "colors": {1: (215, 25, 28, 220)}},
+}
+
+LAYER_GROUPS = {
+    "crop_type_class": {
+        "name": "作物类型分类",
+        "children": [
+            {"key": "crop_type_class", "name": "作物类型分类编码"},
+            {"key": "truecolor_rgb", "name": "影像RGB"},
+            {"key": "vitality_index_ndvi_rgb", "name": "NDVI"},
+            {"key": "ndre_index_rgb", "name": "NDRE"},
+        ],
+    },
+    "crop_yield_estimate": {
+        "name": "作物估产",
+        "children": [
+            {"key": "crop_yield_estimate", "name": "产量演示数值_t_ha"},
+            {"key": "crop_yield_estimate_rgb", "name": "产量空间差异彩色展示_RGB"},
+            {"key": "vitality_index_ndvi_gray", "name": "NDVI灰度拉伸预览"},
+            {"key": "crop_yield_estimate_gray", "name": "产量灰度拉伸预览"},
+            {"key": "vitality_index_ndvi_rgb", "name": "NDVI"},
+        ],
+    },
+}
+
+DERIVED_LAYER_META = {
+    "truecolor_rgb": {
+        "legend": [{"kind": "note", "name": "影像RGB", "note": "Sentinel-2 真彩色影像，用于辅助判读作物分类和估产结果。"}],
+    },
+    "vitality_index_ndvi_rgb": {
+        "legend": [
+            {"kind": "note", "name": "NDVI", "note": "归一化植被指数，红色代表低植被活力，绿色代表高植被活力。"},
+            {"value": 1, "name": "低值", "color": "#d73027", "note": "植被覆盖低或长势弱。"},
+            {"value": 2, "name": "中值", "color": "#fdae61", "note": "中等植被覆盖。"},
+            {"value": 3, "name": "高值", "color": "#1a9850", "note": "植被覆盖和长势较好。"},
+        ],
+    },
+    "ndre_index_rgb": {
+        "legend": [
+            {"kind": "note", "name": "NDRE", "note": "红边植被指数，对冠层叶绿素和作物活力变化更敏感。"},
+            {"value": 1, "name": "低红边活力", "color": "#d73027", "note": "作物活力或叶绿素水平偏低。"},
+            {"value": 2, "name": "中等红边活力", "color": "#fdae61", "note": "作物活力中等。"},
+            {"value": 3, "name": "高红边活力", "color": "#1a9850", "note": "冠层活力较强。"},
+        ],
+    },
+    "crop_yield_estimate_rgb": {
+        "legend": [
+            {"kind": "note", "name": "产量空间差异", "note": "基于遥感指数的演示型产量空间差异，适合展示相对高低。"},
+            {"value": 1, "name": "低值区", "color": "#d73027", "note": "相对产量潜力较低。"},
+            {"value": 2, "name": "中值区", "color": "#fee08b", "note": "相对产量潜力中等。"},
+            {"value": 3, "name": "高值区", "color": "#1a9850", "note": "相对产量潜力较高。"},
+        ],
+    },
+    "vitality_index_ndvi_gray": {
+        "legend": [{"kind": "note", "name": "NDVI灰度拉伸预览", "note": "用于快速查看 NDVI 空间纹理，灰度值经过显示拉伸，不作为原始数值分析。"}],
+    },
+    "crop_yield_estimate_gray": {
+        "legend": [{"kind": "note", "name": "产量灰度拉伸预览", "note": "用于快速查看估产空间纹理，灰度值经过显示拉伸，不作为原始产量值分析。"}],
+    },
+}
+
+EXPORT_LAYER_NAMES = {
+    "truecolor_rgb": "影像RGB",
+    "vitality_index_ndvi_rgb": "NDVI",
+    "ndre_index_rgb": "NDRE",
+    "crop_yield_estimate_rgb": "产量空间差异彩色展示_RGB",
+    "vitality_index_ndvi_gray": "NDVI灰度拉伸预览",
+    "crop_yield_estimate_gray": "产量灰度拉伸预览",
 }
 
 
@@ -336,30 +431,51 @@ def stop_process():
 @app.get("/api/layers")
 def layers():
     output_dir = Path(request.args.get("output_dir") or LOCAL_OUTPUT_DIR)
-    mosaic_dir = output_dir / "clipped"
-    if not mosaic_dir.exists():
-        mosaic_dir = output_dir / "mosaic"
     items = []
-    for tif in sorted(mosaic_dir.glob("*.tif")):
-        key = tif.stem
-        if key not in LAYER_META:
+    for key, group in LAYER_GROUPS.items():
+        source_tif = _result_tif_path(output_dir, key)
+        if not source_tif.exists():
             continue
-        bounds = _tif_bounds_wgs84(tif)
+        bounds = _tif_bounds_wgs84(source_tif)
         meta = LAYER_META[key]
-        items.append({"key": key, "name": meta["name"], "bounds": bounds, "png": f"/api/render/{key}.png?output_dir={output_dir}", "tif": f"/api/tif/{key}?output_dir={output_dir}", "legend": meta["legend"]})
+        children = []
+        for child in group["children"]:
+            child_key = child["key"]
+            if not _has_layer_asset(output_dir, child_key):
+                continue
+            children.append(
+                {
+                    "key": child_key,
+                    "name": child["name"],
+                    "png": f"/api/render/{child_key}.png?output_dir={output_dir}",
+                    "tif": f"/api/tif/{child_key}?output_dir={output_dir}",
+                    "legend": _layer_legend(child_key),
+                }
+            )
+        items.append(
+            {
+                "key": key,
+                "name": group["name"],
+                "bounds": bounds,
+                "png": f"/api/render/{key}.png?output_dir={output_dir}",
+                "tif": f"/api/tif/{key}?output_dir={output_dir}",
+                "legend": meta["legend"],
+                "children": children,
+            }
+        )
     return jsonify({"ok": True, "items": items})
 
 
 @app.get("/api/render/<layer>.png")
 def render_layer(layer: str):
     output_dir = Path(request.args.get("output_dir") or LOCAL_OUTPUT_DIR)
-    tif = _result_tif_path(output_dir, layer)
+    tif = _materialize_export_tif(output_dir, layer)
     if not tif.exists():
         return jsonify({"ok": False, "error": f"图层不存在：{layer}"}), 404
-    png = output_dir / "render_cache" / f"{layer}.png"
+    png = output_dir / "render_cache" / f"{layer}_{DERIVED_RENDER_VERSION}.png"
     color_overrides = _parse_color_overrides(request.args.get("colors"))
     if color_overrides:
-        png = output_dir / "render_cache" / f"{layer}_{abs(hash(json.dumps(color_overrides, sort_keys=True)))}.png"
+        png = output_dir / "render_cache" / f"{layer}_{DERIVED_RENDER_VERSION}_{abs(hash(json.dumps(color_overrides, sort_keys=True)))}.png"
     if not png.exists() or png.stat().st_mtime < tif.stat().st_mtime:
         png.parent.mkdir(parents=True, exist_ok=True)
         meta = _meta_with_color_overrides(LAYER_META.get(layer, LAYER_META["anomaly_combined"]), color_overrides)
@@ -370,7 +486,7 @@ def render_layer(layer: str):
 @app.get("/api/tif/<layer>")
 def tif_download(layer: str):
     output_dir = Path(request.args.get("output_dir") or LOCAL_OUTPUT_DIR)
-    tif = _result_tif_path(output_dir, layer)
+    tif = _materialize_export_tif(output_dir, layer)
     if not tif.exists():
         return jsonify({"ok": False, "error": f"TIF 不存在：{layer}"}), 404
     return send_file(tif, as_attachment=True, download_name=_export_tif_name(output_dir, layer))
@@ -385,7 +501,16 @@ def tif_batch_download():
     if not source_dir.exists():
         return jsonify({"ok": False, "error": "没有可导出的 TIF 结果"}), 404
 
-    tif_files = [path for path in sorted(source_dir.glob("*.tif")) if path.stem in LAYER_META]
+    tif_keys = []
+    for key, group in LAYER_GROUPS.items():
+        if _has_layer_asset(output_dir, key):
+            tif_keys.append(key)
+        for child in group["children"]:
+            if _has_layer_asset(output_dir, child["key"]):
+                tif_keys.append(child["key"])
+    tif_keys = list(dict.fromkeys(tif_keys))
+    tif_files = [(key, _materialize_export_tif(output_dir, key)) for key in tif_keys]
+    tif_files = [(key, path) for key, path in tif_files if path.exists()]
     if not tif_files:
         return jsonify({"ok": False, "error": "没有可导出的 TIF 结果"}), 404
 
@@ -393,9 +518,24 @@ def tif_batch_download():
     export_dir.mkdir(parents=True, exist_ok=True)
     zip_path = export_dir / "processed_tif_results.zip"
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for tif in tif_files:
-            zf.write(tif, arcname=_export_tif_name(output_dir, tif.stem))
+        for key, tif in tif_files:
+            zf.write(tif, arcname=_export_tif_name(output_dir, key))
     return send_file(zip_path, as_attachment=True, download_name=zip_path.name)
+
+
+def _has_layer_asset(output_dir: Path, layer: str) -> bool:
+    if layer.endswith("_rgb") or layer.endswith("_gray"):
+        return _derived_source_tif_path(output_dir, layer).exists()
+    return _result_tif_path(output_dir, layer).exists()
+
+
+def _layer_legend(layer: str) -> list[dict]:
+    if layer in DERIVED_LAYER_META:
+        return DERIVED_LAYER_META[layer]["legend"]
+    if layer.endswith("_rgb") or layer.endswith("_gray"):
+        base = layer.rsplit("_", 1)[0]
+        return LAYER_META.get(base, {}).get("legend", [])
+    return LAYER_META.get(layer, {}).get("legend", [])
 
 
 def _result_tif_path(output_dir: Path, layer: str) -> Path:
@@ -405,9 +545,38 @@ def _result_tif_path(output_dir: Path, layer: str) -> Path:
     return output_dir / "mosaic" / f"{layer}.tif"
 
 
+def _derived_source_tif_path(output_dir: Path, layer: str) -> Path:
+    if layer.endswith("_rgb"):
+        return _result_tif_path(output_dir, layer[:-4])
+    if layer.endswith("_gray"):
+        return _result_tif_path(output_dir, layer[:-5])
+    return _result_tif_path(output_dir, layer)
+
+
+def _materialize_export_tif(output_dir: Path, layer: str) -> Path:
+    if not (layer.endswith("_rgb") or layer.endswith("_gray")):
+        return _result_tif_path(output_dir, layer)
+
+    source_tif = _derived_source_tif_path(output_dir, layer)
+    if not source_tif.exists():
+        return source_tif
+
+    export_dir = output_dir / "exports" / "derived_tif"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    target = export_dir / f"{layer}_{DERIVED_RENDER_VERSION}.tif"
+    if target.exists() and target.stat().st_mtime >= source_tif.stat().st_mtime:
+        return target
+
+    if layer.endswith("_rgb"):
+        _write_rgb_preview_tif(source_tif, target, layer)
+    else:
+        _write_gray_preview_tif(source_tif, target)
+    return target
+
+
 def _export_tif_name(output_dir: Path, layer: str) -> str:
     metadata = _load_processing_metadata(output_dir)
-    layer_name = _safe_filename(LAYER_META.get(layer, {}).get("name") or layer)
+    layer_name = _safe_filename(EXPORT_LAYER_NAMES.get(layer) or LAYER_META.get(layer, {}).get("name") or layer)
     date_part = _export_date_part(metadata)
     tile_part = _export_tile_part(metadata)
     parts = [layer_name]
@@ -667,6 +836,37 @@ def _hex_to_rgb(value: str) -> tuple[int, int, int]:
     return int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16)
 
 
+def _write_rgb_preview_tif(source_tif: Path, target_tif: Path, layer: str) -> None:
+    with rasterio.open(source_tif) as src:
+        if src.count >= 3:
+            data = src.read([1, 2, 3])
+        else:
+            base_layer = layer[:-4]
+            data = _render_tif_rgb_data(source_tif, LAYER_META.get(base_layer, LAYER_META["crop_yield_estimate"]))
+        profile = src.profile.copy()
+        profile.update(driver="GTiff", dtype="uint8", count=3, nodata=0, compress="deflate", tiled=True)
+        with rasterio.open(target_tif, "w", **profile) as dst:
+            dst.write(data.astype("uint8"))
+
+
+def _write_gray_preview_tif(source_tif: Path, target_tif: Path) -> None:
+    with rasterio.open(source_tif) as src:
+        band = src.read(1).astype("float32")
+        valid = np.isfinite(band)
+        if src.nodata is not None:
+            valid &= band != src.nodata
+        out = np.zeros(band.shape, dtype="uint8")
+        if np.any(valid):
+            vmin = float(np.nanmin(band[valid]))
+            vmax = float(np.nanmax(band[valid]))
+            scaled = np.clip((band - vmin) / max(vmax - vmin, 1e-6), 0, 1)
+            out[valid] = (scaled[valid] * 255).astype("uint8")
+        profile = src.profile.copy()
+        profile.update(driver="GTiff", dtype="uint8", count=1, nodata=0, compress="deflate", tiled=True)
+        with rasterio.open(target_tif, "w", **profile) as dst:
+            dst.write(out, 1)
+
+
 def _tif_bounds_wgs84(tif: Path) -> list[list[float]]:
     with rasterio.open(tif) as ds:
         left, bottom, right, top = transform_bounds(ds.crs, "EPSG:4326", *ds.bounds, densify_pts=21)
@@ -769,14 +969,35 @@ def _render_tif_png(tif: Path, png: Path, meta: dict) -> None:
         scale = max(ds.width / max_size, ds.height / max_size, 1)
         out_width = max(1, int(ds.width / scale))
         out_height = max(1, int(ds.height / scale))
+        if ds.count >= 3:
+            rgb = ds.read([1, 2, 3], out_shape=(3, out_height, out_width), resampling=Resampling.nearest)
+            rgb = np.transpose(rgb, (1, 2, 0)).astype("uint8")
+            alpha = np.where(np.any(rgb > 0, axis=2), 185, 0).astype("uint8")
+            rgba = np.dstack([rgb, alpha])
+            Image.fromarray(rgba, mode="RGBA").save(png)
+            return
         data = ds.read(1, out_shape=(out_height, out_width), resampling=Resampling.nearest)
         nodata = ds.nodata
 
+    rgba = _render_single_band_rgba(data, nodata, meta)
+    Image.fromarray(rgba, mode="RGBA").save(png)
+
+
+def _render_tif_rgb_data(tif: Path, meta: dict) -> np.ndarray:
+    with rasterio.open(tif) as ds:
+        data = ds.read(1)
+        nodata = ds.nodata
+    rgba = _render_single_band_rgba(data, nodata, meta)
+    return np.transpose(rgba[..., :3], (2, 0, 1))
+
+
+def _render_single_band_rgba(data: np.ndarray, nodata, meta: dict) -> np.ndarray:
     rgba = np.zeros((data.shape[0], data.shape[1], 4), dtype=np.uint8)
     valid = np.ones(data.shape, dtype=bool)
     if nodata is not None:
         valid &= data != nodata
     valid &= np.isfinite(data)
+    nodata_mask = ~valid
     if meta.get("type") == "gradient":
         vmin = float(meta.get("min", np.nanmin(data[valid]) if np.any(valid) else 0))
         vmax = float(meta.get("max", np.nanmax(data[valid]) if np.any(valid) else 1))
@@ -790,8 +1011,8 @@ def _render_tif_png(tif: Path, png: Path, meta: dict) -> None:
     else:
         for value, color in meta.get("colors", {}).items():
             rgba[data == value] = color
-        rgba[~valid] = (0, 0, 0, 0)
-    Image.fromarray(rgba, mode="RGBA").save(png)
+    rgba[nodata_mask] = (0, 0, 0, 0)
+    return rgba
 
 
 def _clear_render_cache(output_dir: Path) -> None:
