@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+env/
+
+# Local configuration and credentials
+.env
+*_netrc
+.netrc
+
+# Local data, downloads, and generated outputs
+data/
+*.SAFE/
+*.zip
+*.part
+*.tif
+*.tiff
+*.aux.xml
+download/download.log
+
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Runtime artifacts
+render_cache/
+exports/
+processing_metadata.json
+
+# Generated output / backup directories
+农业监测_草埠湖/
+农业监测_草埠湖 - 副本/
+git_data/

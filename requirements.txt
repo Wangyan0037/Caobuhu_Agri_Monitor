@@ -1,0 +1,16 @@
+# Web server
+flask>=3.0
+
+# Numerical and image/raster/vector processing
+numpy>=2.0
+rasterio>=1.4
+pillow>=10.0
+pyshp>=2.3
+
+# Copernicus Sentinel-1/Sentinel-2 download
+requests>=2.31
+python-dotenv>=1.0
+rich>=13.0
+tenacity>=8.0
+asf_search>=8.0
+tqdm>=4.66

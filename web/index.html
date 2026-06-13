@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>草埠湖近实时农业遥感监测系统</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark"></div>
+        <div>
+          <h1>草埠湖近实时农业遥感监测系统</h1>
+          <p>遥感数据下载、处理、叠加与结果导出</p>
+        </div>
+      </div>
+
+      <div class="tabs">
+        <button class="tab active" data-panel="downloadPanel">数据下载</button>
+        <button class="tab" data-panel="processPanel">数据处理</button>
+        <button class="tab" data-panel="layerPanel">结果图层</button>
+      </div>
+
+      <section id="downloadPanel" class="panel active">
+        <h2>区域与检索</h2>
+        <label>区域文件</label>
+        <input id="aoiFile" type="file" accept=".geojson,.json,.shp">
+        <div class="button-row single">
+          <button id="saveDrawnAoi" class="secondary">保存地图绘制区域</button>
+        </div>
+        <label>AOI 路径</label>
+        <input id="aoiPath" placeholder="上传或绘制后自动填入">
+        <div class="grid-2">
+          <div><label>开始日期</label><input id="startDate" type="date"></div>
+          <div><label>结束日期</label><input id="endDate" type="date"></div>
+        </div>
+        <label>数据类型</label>
+        <select id="productType">
+          <option value="SENTINEL-2-L2A">Sentinel-2 L2A</option>
+          <option value="SENTINEL-2-L1C">Sentinel-2 L1C</option>
+          <option value="SENTINEL-1">Sentinel-1 GRD</option>
+        </select>
+        <label>产品名过滤</label>
+        <input id="contains" placeholder="例如 T49RFP, T49RFQ">
+        <div class="grid-2">
+          <div><label>最多检索</label><input id="limit" type="number" min="1" placeholder="不填则使用默认值"></div>
+          <div><label>并发下载</label><input id="workers" type="number" min="1" max="10" value="2"></div>
+        </div>
+        <label>ZIP 保存文件夹</label>
+        <div class="path-row">
+          <input id="zipDir">
+          <button id="chooseZipDir" class="secondary">选择</button>
+        </div>
+        <label>SAFE 解压文件夹</label>
+        <div class="path-row">
+          <input id="downloadSafeDir">
+          <button id="chooseSafeDir" class="secondary">选择</button>
+        </div>
+        <div class="progress-wrap">
+          <div class="progress-bar"><div id="downloadProgress"></div></div>
+          <span id="downloadProgressText">未开始</span>
+        </div>
+        <div class="button-row">
+          <button id="searchBtn">数据检索</button>
+          <button id="downloadBtn">数据下载</button>
+          <button id="stopDownloadBtn" class="danger">停止下载</button>
+        </div>
+      </section>
+
+      <section id="processPanel" class="panel">
+        <h2>本地处理</h2>
+        <label>处理范围</label>
+        <div class="path-row">
+          <input id="processScopeFilePath" placeholder="选择 SHP、GeoJSON 或 JSON 矢量范围文件">
+          <button id="chooseProcessScopeFile" class="secondary">选择</button>
+        </div>
+        <label>处理 AOI 路径</label>
+        <div class="path-row">
+          <input id="processAoiPath" placeholder="支持 GeoJSON/JSON/SHP；可同步地图绘制范围">
+          <button id="syncProcessAoi" class="secondary">同步</button>
+        </div>
+        <label>光学数据输入目录</label>
+        <div class="path-row">
+          <input id="opticalSafeDir">
+          <button id="chooseOpticalSafeDir" class="secondary">选择</button>
+        </div>
+        <label>雷达数据输入目录</label>
+        <div class="path-row">
+          <input id="radarSafeDir" placeholder="可留空">
+          <button id="chooseRadarSafeDir" class="secondary">选择</button>
+        </div>
+        <div class="grid-2">
+          <div><label>处理开始日期</label><input id="processStartDate" type="date"></div>
+          <div><label>处理结束日期</label><input id="processEndDate" type="date"></div>
+        </div>
+        <label>处理输出目录</label>
+        <div class="path-row">
+          <input id="outputDir">
+          <button id="chooseOutputDir" class="secondary">选择</button>
+        </div>
+
+        <div class="param-card">
+          <h3>通用质量过滤</h3>
+          <div class="param-grid">
+            <label>云/阴影 SCL 排除值<input data-param="scl_excluded_classes" type="text" value="0,1,3,8,9,10,11"></label>
+            <label>最小有效反射率<input data-param="reflectance_min" type="number" step="0.001" placeholder="默认不过滤"></label>
+            <label>最大有效反射率<input data-param="reflectance_max" type="number" step="0.01" placeholder="默认不过滤"></label>
+            <label>最小有效像元比例<input data-param="min_valid_ratio" type="number" step="0.01" placeholder="默认不限制"></label>
+            <label>输出分辨率（米）<input data-param="output_resolution_m" type="number" step="10" value="10"></label>
+            <label>重采样方法<select data-param="resampling_method"><option value="bilinear">bilinear</option><option value="nearest">nearest</option><option value="cubic">cubic</option></select></label>
+          </div>
+        </div>
+
+        <div class="process-products">
+          <div class="process-head">
+            <span>处理项</span>
+            <button id="toggleAllOutputs" class="secondary small-btn" type="button">全选</button>
+          </div>
+          <article class="process-item" data-output-item="vitality_grade">
+            <label class="checkline"><input type="checkbox" class="process-output" value="vitality_grade"> 长势等级</label>
+            <div class="mini-grid">
+              <label>差 NDVI<input data-param="vitality_poor_ndvi" type="number" step="0.01" value="0.20"></label>
+              <label>弱 NDVI<input data-param="vitality_weak_ndvi" type="number" step="0.01" value="0.35"></label>
+              <label>正常 NDVI<input data-param="vitality_normal_ndvi" type="number" step="0.01" value="0.55"></label>
+              <label>低红边 NDRE<input data-param="vitality_low_ndre" type="number" step="0.01" value="0.18"></label>
+            </div>
+            <div class="item-progress"><div class="item-progress-fill"></div><span>等待</span></div>
+          </article>
+          <article class="process-item" data-output-item="moisture_grade">
+            <label class="checkline"><input type="checkbox" class="process-output" value="moisture_grade"> 墒情等级</label>
+            <div class="mini-grid">
+              <label>干旱 NDWI<input data-param="dry_ndwi" type="number" step="0.01" value="-0.15"></label>
+              <label>偏湿 NDWI<input data-param="wet_ndwi" type="number" step="0.01" value="0.10"></label>
+              <label>积水 NDWI<input data-param="water_ndwi" type="number" step="0.01" value="0.30"></label>
+              <label>积水 LSWI<input data-param="water_lswi" type="number" step="0.01" value="0.40"></label>
+            </div>
+            <div class="item-progress"><div class="item-progress-fill"></div><span>等待</span></div>
+          </article>
+          <article class="process-item" data-output-item="anomaly_combined">
+            <label class="checkline"><input type="checkbox" class="process-output" value="anomaly_combined"> 综合异常</label>
+            <div class="mini-grid">
+              <label>弱长势权重<input data-param="weak_vitality_weight" type="number" step="0.1" value="1.0"></label>
+              <label>干旱权重<input data-param="drought_weight" type="number" step="0.1" value="1.5"></label>
+              <label>积水权重<input data-param="waterlogging_weight" type="number" step="0.1" value="1.5"></label>
+              <label>异常最小斑块像元<input data-param="min_anomaly_pixels" type="number" step="1" value="9"></label>
+            </div>
+            <div class="item-progress"><div class="item-progress-fill"></div><span>等待</span></div>
+          </article>
+          <article class="process-item" data-output-item="patrol_priority">
+            <label class="checkline"><input type="checkbox" class="process-output" value="patrol_priority"> 巡田优先级</label>
+            <div class="mini-grid">
+              <label>中优先级阈值<input data-param="priority_medium_score" type="number" step="0.1" value="1.5"></label>
+              <label>高优先级阈值<input data-param="priority_high_score" type="number" step="0.1" value="2.5"></label>
+              <label>贴近道路权重<input data-param="road_proximity_weight" type="number" step="0.1" value="0.0"></label>
+              <label>连续异常加权<input data-param="persistent_anomaly_weight" type="number" step="0.1" value="0.5"></label>
+            </div>
+            <div class="item-progress"><div class="item-progress-fill"></div><span>等待</span></div>
+          </article>
+          <article class="process-item" data-output-item="vitality_index_ndvi">
+            <label class="checkline"><input type="checkbox" class="process-output" value="vitality_index_ndvi"> NDVI 连续值</label>
+            <div class="mini-grid">
+              <label>NDVI 最小显示<input data-param="ndvi_display_min" type="number" step="0.01" value="0.00"></label>
+              <label>NDVI 最大显示<input data-param="ndvi_display_max" type="number" step="0.01" value="0.80"></label>
+              <label>异常低值阈值<input data-param="ndvi_low_threshold" type="number" step="0.01" value="0.30"></label>
+              <label>平滑窗口<input data-param="ndvi_smooth_window" type="number" step="1" value="1"></label>
+            </div>
+            <div class="item-progress"><div class="item-progress-fill"></div><span>等待</span></div>
+          </article>
+          <article class="process-item" data-output-item="ndvi_last_year_delta">
+            <label class="checkline"><input type="checkbox" class="process-output" value="ndvi_last_year_delta"> 去年同期 NDVI 差值</label>
+            <div class="mini-grid">
+              <label>同期窗口天数<input data-param="last_year_window_days" type="number" step="1" value="15"></label>
+              <label>显著下降<input data-param="vitality_decline_delta" type="number" step="0.01" value="0.10"></label>
+              <label>对比最少影像<input data-param="comparison_min_scenes" type="number" step="1" value="1"></label>
+              <label>允许云量上限<input data-param="comparison_cloud_max" type="number" step="1" value="30"></label>
+            </div>
+            <div class="item-progress"><div class="item-progress-fill"></div><span>等待</span></div>
+          </article>
+          <article class="process-item" data-output-item="anomaly_drought">
+            <label class="checkline"><input type="checkbox" class="process-output" value="anomaly_drought"> 疑似干旱</label>
+            <div class="mini-grid">
+              <label>要求弱长势<input data-param="drought_requires_weak" type="checkbox" checked></label>
+              <label>NDWI 干旱阈值<input data-param="drought_ndwi_max" type="number" step="0.01" value="-0.15"></label>
+              <label>NDVI 上限<input data-param="drought_ndvi_max" type="number" step="0.01" value="0.45"></label>
+              <label>S1 VV 干旱阈值 dB<input data-param="dry_vv_db" type="number" step="0.5" value="-16.0"></label>
+            </div>
+            <div class="item-progress"><div class="item-progress-fill"></div><span>等待</span></div>
+          </article>
+          <article class="process-item" data-output-item="anomaly_waterlogging">
+            <label class="checkline"><input type="checkbox" class="process-output" value="anomaly_waterlogging"> 疑似积水</label>
+            <div class="mini-grid">
+              <label>NDWI 积水阈值<input data-param="waterlogging_ndwi_min" type="number" step="0.01" value="0.30"></label>
+              <label>LSWI 积水阈值<input data-param="waterlogging_lswi_min" type="number" step="0.01" value="0.40"></label>
+              <label>S1 VV 积水阈值 dB<input data-param="water_vv_db" type="number" step="0.5" value="-8.0"></label>
+              <label>导出单项掩膜<input data-param="export_masks" type="checkbox" checked></label>
+            </div>
+            <div class="item-progress"><div class="item-progress-fill"></div><span>等待</span></div>
+          </article>
+          <article class="process-item" data-output-item="anomaly_fallow">
+            <label class="checkline"><input type="checkbox" class="process-output" value="anomaly_fallow"> 疑似撂荒</label>
+            <div class="mini-grid">
+              <label>NDVI 最大值<input data-param="fallow_ndvi_max" type="number" step="0.01" value="0.35"></label>
+              <label>NDVI 振幅上限<input data-param="fallow_ndvi_amp" type="number" step="0.01" value="0.20"></label>
+              <label>裸土 NDBI 下限<input data-param="fallow_ndbi_min" type="number" step="0.01" value="0.05"></label>
+              <label>连续低值天数<input data-param="fallow_min_days" type="number" step="1" value="30"></label>
+            </div>
+            <div class="item-progress"><div class="item-progress-fill"></div><span>等待</span></div>
+          </article>
+          <article class="process-item" data-output-item="anomaly_nonagri">
+            <label class="checkline"><input type="checkbox" class="process-output" value="anomaly_nonagri"> 疑似非农化</label>
+            <div class="mini-grid">
+              <label>NDVI 下降阈值<input data-param="nonagri_ndvi_drop" type="number" step="0.01" value="-0.15"></label>
+              <label>NDBI 上升阈值<input data-param="nonagri_ndbi_rise" type="number" step="0.01" value="0.05"></label>
+              <label>裸土/建设 NDVI 上限<input data-param="nonagri_ndvi_max" type="number" step="0.01" value="0.30"></label>
+              <label>最小持续天数<input data-param="nonagri_min_days" type="number" step="1" value="15"></label>
+            </div>
+            <div class="item-progress"><div class="item-progress-fill"></div><span>等待</span></div>
+          </article>
+        </div>
+        <div class="button-row process-actions">
+          <button id="processBtn">开始处理并生成 TIF</button>
+          <button id="stopProcessBtn" class="secondary">停止处理</button>
+        </div>
+      </section>
+
+      <section id="layerPanel" class="panel">
+        <h2>地图叠加</h2>
+        <label class="checkline compact"><input id="showBoundaryPreview" type="checkbox" checked> 显示处理范围边界预览</label>
+        <div class="button-row">
+          <button id="loadLayersBtn">加载处理结果</button>
+          <button id="batchExportBtn" class="secondary">批量导出 TIF</button>
+        </div>
+        <div id="layerList" class="layer-list"></div>
+      </section>
+
+      <section class="status">
+        <h2>运行状态</h2>
+        <pre id="statusText">系统就绪</pre>
+      </section>
+    </aside>
+
+    <main class="map-wrap">
+      <div class="map-toolbar">
+        <button id="streetBtn">地图</button>
+        <button id="satelliteBtn" class="active">卫星图像</button>
+      </div>
+      <div id="map"></div>
+      <div id="legend" class="legend hidden">
+        <h3>图层说明</h3>
+        <div id="legendItems"></div>
+      </div>
+      <div id="mapStatusBar" class="map-status-bar">
+        <span id="creditText">Leaflet | Esri World Imagery</span>
+        <span id="coordText">经度: -- 纬度: --</span>
+        <span id="scaleText" class="inline-scale"><span class="scale-line"></span><span>--</span></span>
+      </div>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
