@@ -420,9 +420,9 @@ function addLayerControl(layer, visible) {
   `;
   const checkbox = card.querySelector("input[type='checkbox']");
   checkbox.onchange = () => {
-    toggleLayer(layer, checkbox.checked);
     if (!checkbox.checked) {
       card.querySelectorAll(".layer-child input").forEach(input => { input.checked = false; });
+      hideLayerFamily(layer);
     }
   };
   card.querySelectorAll(".layer-child input").forEach(input => {
@@ -430,17 +430,28 @@ function addLayerControl(layer, visible) {
       const child = (layer.children || []).find(item => item.key === input.value);
       if (!child) return;
       checkbox.checked = true;
-      toggleLayer({ ...layer, ...child }, input.checked);
+      hideLayerFamily(layer);
+      toggleLayer({ ...layer, ...child, children: [] }, input.checked);
     };
   });
   $("layerList").appendChild(card);
-  if (visible) toggleLayer(layer, true);
 }
 
 function clearOverlays() {
   Object.values(state.overlays).forEach(layer => map.removeLayer(layer));
   state.overlays = {};
   $("legendItems").innerHTML = "";
+}
+
+function hideLayerFamily(layer) {
+  const keys = [layer.key, ...(layer.children || []).map(child => child.key)];
+  keys.forEach(key => {
+    if (state.overlays[key]) {
+      map.removeLayer(state.overlays[key]);
+      delete state.overlays[key];
+    }
+  });
+  if (Object.keys(state.overlays).length === 0) $("legend").classList.add("hidden");
 }
 
 function toggleLayer(layer, visible) {

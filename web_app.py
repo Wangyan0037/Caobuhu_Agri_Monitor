@@ -31,7 +31,7 @@ SENTINEL_DOWNLOAD_SCRIPT = APP_DIR / "download" / "S2_CDSE_download.py"
 S1_ASF_DOWNLOAD_SCRIPT = APP_DIR / "download" / "S1_ASF_auto_download.py"
 
 app = Flask(__name__, static_folder=str(STATIC_DIR), static_url_path="/static")
-DERIVED_RENDER_VERSION = "v2"
+DERIVED_RENDER_VERSION = "v4"
 
 JOBS: dict[str, dict] = {
     "download": {"status": "idle", "message": "等待检索", "items": [], "percent": 0, "progress_text": "未开始"},
@@ -104,8 +104,25 @@ LAYER_META = {
             {"value": 3, "name": "NDVI 0.55-0.80 高", "color": "#1a9850", "note": "植被活力高。"},
         ],
         "type": "gradient",
-        "min": 0.0,
-        "max": 0.8,
+        "min": 0.15,
+        "max": 0.85,
+        "gradient_low": (215, 48, 39),
+        "gradient_mid": (254, 224, 139),
+        "gradient_high": (26, 152, 80),
+    },
+    "ndre_index": {
+        "name": "NDRE",
+        "legend": [
+            {"value": 1, "name": "NDRE 低", "color": "#d73027", "note": "红边活力偏低。"},
+            {"value": 2, "name": "NDRE 中", "color": "#fee08b", "note": "红边活力中等。"},
+            {"value": 3, "name": "NDRE 高", "color": "#1a9850", "note": "红边活力较高。"},
+        ],
+        "type": "gradient",
+        "min": 0.02,
+        "max": 0.35,
+        "gradient_low": (215, 48, 39),
+        "gradient_mid": (254, 224, 139),
+        "gradient_high": (26, 152, 80),
     },
     "ndvi_last_year_delta": {
         "name": "去年同期 NDVI 差值",
@@ -155,7 +172,7 @@ LAYER_GROUPS = {
     "crop_type_class": {
         "name": "作物类型分类",
         "children": [
-            {"key": "crop_type_class", "name": "作物类型分类编码"},
+            {"key": "crop_type_class", "name": "作物类型分类"},
             {"key": "truecolor_rgb", "name": "影像RGB"},
             {"key": "vitality_index_ndvi_rgb", "name": "NDVI"},
             {"key": "ndre_index_rgb", "name": "NDRE"},
@@ -165,7 +182,7 @@ LAYER_GROUPS = {
         "name": "作物估产",
         "children": [
             {"key": "crop_yield_estimate", "name": "产量演示数值_t_ha"},
-            {"key": "crop_yield_estimate_rgb", "name": "产量空间差异彩色展示_RGB"},
+            {"key": "truecolor_rgb", "name": "影像RGB"},
             {"key": "vitality_index_ndvi_gray", "name": "NDVI灰度拉伸预览"},
             {"key": "crop_yield_estimate_gray", "name": "产量灰度拉伸预览"},
             {"key": "vitality_index_ndvi_rgb", "name": "NDVI"},
@@ -202,9 +219,11 @@ DERIVED_LAYER_META = {
         ],
     },
     "vitality_index_ndvi_gray": {
+        "type": "gray",
         "legend": [{"kind": "note", "name": "NDVI灰度拉伸预览", "note": "用于快速查看 NDVI 空间纹理，灰度值经过显示拉伸，不作为原始数值分析。"}],
     },
     "crop_yield_estimate_gray": {
+        "type": "gray",
         "legend": [{"kind": "note", "name": "产量灰度拉伸预览", "note": "用于快速查看估产空间纹理，灰度值经过显示拉伸，不作为原始产量值分析。"}],
     },
 }
@@ -478,7 +497,7 @@ def render_layer(layer: str):
         png = output_dir / "render_cache" / f"{layer}_{DERIVED_RENDER_VERSION}_{abs(hash(json.dumps(color_overrides, sort_keys=True)))}.png"
     if not png.exists() or png.stat().st_mtime < tif.stat().st_mtime:
         png.parent.mkdir(parents=True, exist_ok=True)
-        meta = _meta_with_color_overrides(LAYER_META.get(layer, LAYER_META["anomaly_combined"]), color_overrides)
+        meta = _meta_with_color_overrides(_layer_render_meta(layer), color_overrides)
         _render_tif_png(tif, png, meta)
     return send_file(png, mimetype="image/png")
 
@@ -536,6 +555,18 @@ def _layer_legend(layer: str) -> list[dict]:
         base = layer.rsplit("_", 1)[0]
         return LAYER_META.get(base, {}).get("legend", [])
     return LAYER_META.get(layer, {}).get("legend", [])
+
+
+def _layer_render_meta(layer: str) -> dict:
+    if layer in DERIVED_LAYER_META:
+        derived = DERIVED_LAYER_META[layer]
+        if layer.endswith("_rgb") or layer.endswith("_gray"):
+            base = layer.rsplit("_", 1)[0]
+            meta = dict(LAYER_META.get(base, {}))
+            meta.update({key: value for key, value in derived.items() if key != "legend"})
+            return meta or {"type": derived.get("type", "gradient")}
+        return derived
+    return LAYER_META.get(layer, LAYER_META["anomaly_combined"])
 
 
 def _result_tif_path(output_dir: Path, layer: str) -> Path:
@@ -860,7 +891,7 @@ def _write_gray_preview_tif(source_tif: Path, target_tif: Path) -> None:
             vmin = float(np.nanmin(band[valid]))
             vmax = float(np.nanmax(band[valid]))
             scaled = np.clip((band - vmin) / max(vmax - vmin, 1e-6), 0, 1)
-            out[valid] = (scaled[valid] * 255).astype("uint8")
+            out[valid] = (1 + scaled[valid] * 254).astype("uint8")
         profile = src.profile.copy()
         profile.update(driver="GTiff", dtype="uint8", count=1, nodata=0, compress="deflate", tiled=True)
         with rasterio.open(target_tif, "w", **profile) as dst:
@@ -998,15 +1029,29 @@ def _render_single_band_rgba(data: np.ndarray, nodata, meta: dict) -> np.ndarray
         valid &= data != nodata
     valid &= np.isfinite(data)
     nodata_mask = ~valid
-    if meta.get("type") == "gradient":
+    if meta.get("type") == "gray":
+        gray = np.clip(data.astype("float32"), 0, 255).astype(np.uint8)
+        rgba[..., 0] = gray
+        rgba[..., 1] = gray
+        rgba[..., 2] = gray
+        rgba[..., 3] = np.where(valid & (gray > 0), 185, 0).astype(np.uint8)
+    elif meta.get("type") == "gradient":
         vmin = float(meta.get("min", np.nanmin(data[valid]) if np.any(valid) else 0))
         vmax = float(meta.get("max", np.nanmax(data[valid]) if np.any(valid) else 1))
         norm = np.clip((data.astype("float32") - vmin) / max(vmax - vmin, 1e-6), 0, 1)
         low = meta.get("gradient_low", (215, 48, 39))
+        mid = meta.get("gradient_mid", (253, 174, 97))
         high = meta.get("gradient_high", (26, 152, 80))
-        rgba[..., 0] = (low[0] * (1 - norm) + high[0] * norm).astype(np.uint8)
-        rgba[..., 1] = (low[1] * (1 - norm) + high[1] * norm).astype(np.uint8)
-        rgba[..., 2] = (low[2] * (1 - norm) + high[2] * norm).astype(np.uint8)
+        lower = norm <= 0.5
+        upper = ~lower
+        t_low = np.clip(norm / 0.5, 0, 1)
+        t_high = np.clip((norm - 0.5) / 0.5, 0, 1)
+        for channel in range(3):
+            rgba[..., channel] = np.where(
+                lower,
+                low[channel] * (1 - t_low) + mid[channel] * t_low,
+                mid[channel] * (1 - t_high) + high[channel] * t_high,
+            ).astype(np.uint8)
         rgba[..., 3] = np.where(valid, 185, 0).astype(np.uint8)
     else:
         for value, color in meta.get("colors", {}).items():
