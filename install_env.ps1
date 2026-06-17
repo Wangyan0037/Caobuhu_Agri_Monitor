@@ -73,7 +73,17 @@ if (-not (Test-Path -LiteralPath $envPath)) {
 CDSE_USERNAME=
 CDSE_PASSWORD=
 
-# Optional defaults.
+# Optional download defaults for Sentinel-2.
+CDSE_START_DATE=
+CDSE_END_DATE=
+CDSE_COLLECTION=sentinel-2-l2a
+CDSE_CONTAINS=
+CDSE_PRODUCT_IDS=
+CDSE_AOI=
+CDSE_AOI_SIMPLIFY=0.0001
+CDSE_LIMIT=100
+CDSE_OUTPUT_DIR=
+CDSE_EXTRACT_DIR=
 CDSE_MAX_WORKERS=2
 
 # Earthdata / ASF account for Sentinel-1 download.
