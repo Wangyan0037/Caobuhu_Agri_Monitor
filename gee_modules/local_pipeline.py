@@ -39,9 +39,12 @@ OUTPUT_NAMES = [
     "anomaly_nonagri",
 ]
 
+RGB_OUTPUT_NAMES = {"truecolor_rgb", "falsecolor_rgb", "truecolor_preview_rgb", "falsecolor_preview_rgb"}
+ALWAYS_OUTPUT_NAMES = {"truecolor_rgb", "falsecolor_rgb", "truecolor_preview_rgb", "falsecolor_preview_rgb"}
+
 SUPPORT_OUTPUTS = {
-    "crop_type_class": {"vitality_index_ndvi", "ndre_index", "truecolor_rgb"},
-    "crop_yield_estimate": {"vitality_index_ndvi", "ndre_index", "truecolor_rgb"},
+    "crop_type_class": {"vitality_index_ndvi", "ndre_index", "truecolor_rgb", "falsecolor_rgb", "truecolor_preview_rgb", "falsecolor_preview_rgb"},
+    "crop_yield_estimate": {"vitality_index_ndvi", "ndre_index", "truecolor_rgb", "falsecolor_rgb", "truecolor_preview_rgb", "falsecolor_preview_rgb"},
 }
 
 WATER_SCL_CLASSES = {6}
@@ -166,6 +169,7 @@ def run_local_processing(
     extra_outputs = set()
     for output_name in outputs_to_write:
         extra_outputs.update(SUPPORT_OUTPUTS.get(output_name, set()))
+    extra_outputs.update(ALWAYS_OUTPUT_NAMES)
     outputs_to_compute = outputs_to_write + [name for name in sorted(extra_outputs) if name not in outputs_to_write]
     params = _merged_processing_params(processing_params or {})
     aoi_geometries = None
@@ -325,7 +329,7 @@ def _process_product_group(
             writers = {}
             try:
                 for name, path in output_paths.items():
-                    profile = rgb_profile if name == "truecolor_rgb" else (
+                    profile = rgb_profile if name in RGB_OUTPUT_NAMES else (
                         float_profile if name in {"vitality_index_ndvi", "ndvi_last_year_delta", "crop_yield_estimate", "ndre_index"} else byte_profile
                     )
                     writers[name] = rasterio.open(
@@ -436,11 +440,18 @@ def _enhanced_vegetation_index(nir: np.ndarray, red: np.ndarray, blue: np.ndarra
     return result.astype("float32")
 
 
-def _truecolor_rgb(red: np.ndarray, green: np.ndarray, blue: np.ndarray, valid: np.ndarray, reflectance_max: float) -> np.ndarray:
-    rgb = np.stack([red, green, blue], axis=0).astype("float32")
-    rgb = np.clip(rgb / max(reflectance_max, 1e-6), 0, 1)
-    rgb = np.power(rgb, 0.9)
+def _stretched_rgb(
+    channels: list[np.ndarray],
+    valid: np.ndarray,
+    reflectance_max: float,
+    reflectance_min: float = 0.02,
+    gamma: float = 1.1,
+) -> np.ndarray:
+    rgb = np.stack(channels, axis=0).astype("float32")
+    rgb = np.clip((rgb - reflectance_min) / max(reflectance_max - reflectance_min, 1e-6), 0, 1)
+    rgb = np.power(rgb, gamma)
     rgb = (rgb * 255).astype("uint8")
+    rgb[:, valid] = np.maximum(rgb[:, valid], 1)
     rgb[:, ~valid] = 0
     return rgb
 
@@ -463,7 +474,7 @@ def _merged_processing_params(overrides: dict) -> dict:
         "nonagri_ndvi_max": 0.30,
         "reflectance_min": None,
         "reflectance_max": None,
-        "scl_excluded_classes": "0,1,3,8,9,10,11",
+        "scl_excluded_classes": "0,1,3,9,11",
         "drought_ndwi_max": THRESHOLDS.dry_ndwi,
         "drought_ndvi_max": 0.45,
         "waterlogging_ndwi_min": THRESHOLDS.water_ndwi,
@@ -475,10 +486,11 @@ def _merged_processing_params(overrides: dict) -> dict:
         "resampling_method": "bilinear",
         "drought_requires_weak": True,
         "export_masks": True,
-        "crop_water_ndvi_max": 0.20,
-        "crop_water_ndwi_min": 0.18,
-        "crop_built_ndvi_max": 0.22,
-        "crop_built_ndbi_min": 0.02,
+        "crop_water_ndvi_max": 0.28,
+        "crop_water_ndwi_min": 0.10,
+        "crop_water_lswi_min": 0.06,
+        "crop_built_ndvi_max": 0.18,
+        "crop_built_ndbi_min": 0.06,
         "crop_rice_ndvi_min": 0.45,
         "crop_rice_lswi_min": 0.10,
         "crop_rice_ndre_min": 0.16,
@@ -492,7 +504,10 @@ def _merged_processing_params(overrides: dict) -> dict:
         "yield_rice_bonus": 0.35,
         "yield_winter_bonus": 0.15,
         "yield_other_bonus": 0.05,
-        "truecolor_reflectance_max": 0.30,
+        "patrol_lai_scale": 6.0,
+        "truecolor_reflectance_min": None,
+        "truecolor_reflectance_max": None,
+        "truecolor_gamma": 0.10,
     }
     for key, value in overrides.items():
         if key in defaults and value not in ("", None):
@@ -509,11 +524,13 @@ def _compute_outputs(bands: dict[str, np.ndarray], scl: np.ndarray, params: dict
     swir1 = bands["B11"]
     swir2 = bands["B12"]
     band_stack = [blue, green, red, rededge1, nir, swir1, swir2]
-    valid = np.logical_and.reduce([np.isfinite(band) for band in band_stack])
+    preview_valid = np.logical_and.reduce([np.isfinite(band) for band in [blue, green, red, nir]])
+    valid_reflectance = np.logical_and.reduce([np.isfinite(band) for band in band_stack])
     if params.get("reflectance_min") not in ("", None):
-        valid &= np.logical_and.reduce([(band >= float(params["reflectance_min"])) for band in band_stack])
+        valid_reflectance &= np.logical_and.reduce([(band >= float(params["reflectance_min"])) for band in band_stack])
     if params.get("reflectance_max") not in ("", None):
-        valid &= np.logical_and.reduce([(band <= float(params["reflectance_max"])) for band in band_stack])
+        valid_reflectance &= np.logical_and.reduce([(band <= float(params["reflectance_max"])) for band in band_stack])
+    valid = valid_reflectance.copy()
     valid &= ~np.isin(scl, _scl_excluded_classes(params.get("scl_excluded_classes")))
 
     ndvi = _normalized_difference(nir, red)
@@ -549,11 +566,15 @@ def _compute_outputs(bands: dict[str, np.ndarray], scl: np.ndarray, params: dict
     anomaly[fallow] = 5
     anomaly[nonagri] = 6
 
-    priority = np.zeros(ndvi.shape, dtype="uint8")
+    lai_proxy = np.clip(ndvi * float(params["patrol_lai_scale"]), 0, 6)
+    priority = np.full(ndvi.shape, NODATA_VALUE, dtype="uint8")
     priority[~valid] = NODATA_VALUE
-    priority[valid & (anomaly == 1)] = 1
-    priority[valid & np.isin(anomaly, [3, 5])] = 2
-    priority[valid & np.isin(anomaly, [4, 6])] = 3
+    priority[valid & (lai_proxy <= 1.0)] = 1
+    priority[valid & (lai_proxy > 1.0) & (lai_proxy <= 1.8)] = 2
+    priority[valid & (lai_proxy > 1.8) & (lai_proxy <= 2.5)] = 3
+    priority[valid & (lai_proxy > 2.5) & (lai_proxy <= 3.2)] = 4
+    priority[valid & (lai_proxy > 3.2) & (lai_proxy <= 4.0)] = 5
+    priority[valid & (lai_proxy > 4.0)] = 6
 
     ndvi_out = ndvi.astype("float32")
     ndvi_out[~valid] = FLOAT_NODATA_VALUE
@@ -562,7 +583,13 @@ def _compute_outputs(bands: dict[str, np.ndarray], scl: np.ndarray, params: dict
     delta = np.full(ndvi.shape, FLOAT_NODATA_VALUE, dtype="float32")
     crop_type = _classify_crop_type(valid, ndvi, ndwi, lswi, ndbi, ndre, scl, params)
     crop_yield = _estimate_crop_yield(valid, crop_type, ndvi, ndre, lswi, evi, params)
-    truecolor = _truecolor_rgb(red, green, blue, valid, float(params["truecolor_reflectance_max"]))
+    rgb_min = 0.02 if params.get("truecolor_reflectance_min") in ("", None) else float(params["truecolor_reflectance_min"])
+    rgb_max = 0.40 if params.get("truecolor_reflectance_max") in ("", None) else float(params["truecolor_reflectance_max"])
+    rgb_gamma = float(params["truecolor_gamma"])
+    truecolor = _stretched_rgb([red, green, blue], preview_valid, rgb_max, rgb_min, rgb_gamma)
+    falsecolor = _stretched_rgb([nir, red, green], preview_valid, rgb_max, rgb_min, rgb_gamma)
+    truecolor_preview = _stretched_rgb([red, green, blue], preview_valid, rgb_max, rgb_min, rgb_gamma)
+    falsecolor_preview = _stretched_rgb([nir, red, green], preview_valid, rgb_max, rgb_min, rgb_gamma)
 
     return {
         "vitality_grade": vitality,
@@ -575,6 +602,9 @@ def _compute_outputs(bands: dict[str, np.ndarray], scl: np.ndarray, params: dict
         "crop_type_class": crop_type,
         "crop_yield_estimate": crop_yield,
         "truecolor_rgb": truecolor,
+        "falsecolor_rgb": falsecolor,
+        "truecolor_preview_rgb": truecolor_preview,
+        "falsecolor_preview_rgb": falsecolor_preview,
         "anomaly_weak_vitality": _mask(anomaly, 1, valid),
         "anomaly_vitality_decline": _placeholder_mask(valid),
         "anomaly_drought": _mask(anomaly, 3, valid),
@@ -607,9 +637,17 @@ def _classify_crop_type(
 
     water = valid & (
         np.isin(scl, list(WATER_SCL_CLASSES))
-        | (((ndwi >= params["crop_water_ndwi_min"]) | (lswi >= params["crop_water_ndwi_min"])) & (ndvi <= params["crop_water_ndvi_max"]))
+        | (
+            (
+                (ndwi >= params["crop_water_ndwi_min"])
+                | (lswi >= params["crop_water_lswi_min"])
+                | ((ndwi + lswi) >= (params["crop_water_ndwi_min"] + params["crop_water_lswi_min"]))
+            )
+            & (ndvi <= params["crop_water_ndvi_max"])
+        )
     )
-    built = valid & (ndvi <= params["crop_built_ndvi_max"]) & (ndbi >= params["crop_built_ndbi_min"]) & ~water
+    thin_cloud_like = np.isin(scl, [8, 10])
+    built = valid & (ndvi <= params["crop_built_ndvi_max"]) & (ndbi >= params["crop_built_ndbi_min"]) & ~water & ~thin_cloud_like
     rice = valid & (ndvi >= params["crop_rice_ndvi_min"]) & (lswi >= params["crop_rice_lswi_min"]) & (ndre >= params["crop_rice_ndre_min"]) & ~water & ~built
     winter_crop = (
         valid

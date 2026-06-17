@@ -8,9 +8,10 @@ import sys
 import threading
 import webbrowser
 import zipfile
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from tkinter import Tk, filedialog
+from urllib.parse import quote
 
 import numpy as np
 import rasterio
@@ -31,7 +32,12 @@ SENTINEL_DOWNLOAD_SCRIPT = APP_DIR / "download" / "S2_CDSE_download.py"
 S1_ASF_DOWNLOAD_SCRIPT = APP_DIR / "download" / "S1_ASF_auto_download.py"
 
 app = Flask(__name__, static_folder=str(STATIC_DIR), static_url_path="/static")
-DERIVED_RENDER_VERSION = "v4"
+DERIVED_RENDER_VERSION = "v8"
+NATIVE_RGB_LAYERS = {"truecolor_rgb", "falsecolor_rgb", "truecolor_preview_rgb", "falsecolor_preview_rgb"}
+RESULT_PNG_ALPHA = 255
+IMPORTED_RESULTS_DIR = APP_DIR / "data" / "imported_results"
+SEARCH_JSON_MARKER = "__SEARCH_RESULTS_JSON__"
+DOWNLOAD_PROGRESS_MARKER = "__DOWNLOAD_PROGRESS_JSON__"
 
 JOBS: dict[str, dict] = {
     "download": {"status": "idle", "message": "等待检索", "items": [], "percent": 0, "progress_text": "未开始"},
@@ -100,29 +106,23 @@ LAYER_META = {
         "name": "NDVI 连续值",
         "legend": [
             {"value": 1, "name": "NDVI 0.00-0.30 低", "color": "#d73027", "note": "植被覆盖或活力低。"},
-            {"value": 2, "name": "NDVI 0.30-0.55 中", "color": "#fdae61", "note": "中等生长水平。"},
-            {"value": 3, "name": "NDVI 0.55-0.80 高", "color": "#1a9850", "note": "植被活力高。"},
+            {"value": 2, "name": "NDVI 0.30-0.55 中", "color": "#fdae61", "note": "中等植被覆盖。"},
+            {"value": 3, "name": "NDVI 0.55-0.80 高", "color": "#1a9850", "note": "植被覆盖和长势较好。"},
         ],
-        "type": "gradient",
-        "min": 0.15,
-        "max": 0.85,
-        "gradient_low": (215, 48, 39),
-        "gradient_mid": (254, 224, 139),
-        "gradient_high": (26, 152, 80),
+        "type": "threshold",
+        "breaks": [0.30, 0.55],
+        "colors": {1: (215, 48, 39, 185), 2: (253, 174, 97, 185), 3: (26, 152, 80, 185)},
     },
     "ndre_index": {
         "name": "NDRE",
         "legend": [
             {"value": 1, "name": "NDRE 低", "color": "#d73027", "note": "红边活力偏低。"},
-            {"value": 2, "name": "NDRE 中", "color": "#fee08b", "note": "红边活力中等。"},
+            {"value": 2, "name": "NDRE 中", "color": "#fdae61", "note": "红边活力中等。"},
             {"value": 3, "name": "NDRE 高", "color": "#1a9850", "note": "红边活力较高。"},
         ],
-        "type": "gradient",
-        "min": 0.02,
-        "max": 0.35,
-        "gradient_low": (215, 48, 39),
-        "gradient_mid": (254, 224, 139),
-        "gradient_high": (26, 152, 80),
+        "type": "threshold",
+        "breaks": [0.12, 0.22],
+        "colors": {1: (215, 48, 39, 185), 2: (253, 174, 97, 185), 3: (26, 152, 80, 185)},
     },
     "ndvi_last_year_delta": {
         "name": "去年同期 NDVI 差值",
@@ -169,11 +169,17 @@ LAYER_META = {
 }
 
 LAYER_GROUPS = {
+    "truecolor_preview_rgb": {
+        "name": "影像预览",
+        "children": [
+            {"key": "truecolor_preview_rgb", "name": "真彩色影像（RGB 自然色）"},
+            {"key": "falsecolor_preview_rgb", "name": "假彩色影像（植被增强 NIR-R-G）"},
+        ],
+    },
     "crop_type_class": {
         "name": "作物类型分类",
         "children": [
             {"key": "crop_type_class", "name": "作物类型分类"},
-            {"key": "truecolor_rgb", "name": "影像RGB"},
             {"key": "vitality_index_ndvi_rgb", "name": "NDVI"},
             {"key": "ndre_index_rgb", "name": "NDRE"},
         ],
@@ -182,7 +188,6 @@ LAYER_GROUPS = {
         "name": "作物估产",
         "children": [
             {"key": "crop_yield_estimate", "name": "产量演示数值_t_ha"},
-            {"key": "truecolor_rgb", "name": "影像RGB"},
             {"key": "vitality_index_ndvi_gray", "name": "NDVI灰度拉伸预览"},
             {"key": "crop_yield_estimate_gray", "name": "产量灰度拉伸预览"},
             {"key": "vitality_index_ndvi_rgb", "name": "NDVI"},
@@ -190,13 +195,37 @@ LAYER_GROUPS = {
     },
 }
 
+SINGLE_LAYER_ORDER = [
+    "vitality_grade",
+    "moisture_grade",
+    "anomaly_combined",
+    "patrol_priority",
+    "vitality_index_ndvi",
+    "ndre_index",
+    "ndvi_last_year_delta",
+    "anomaly_weak_vitality",
+    "anomaly_vitality_decline",
+    "anomaly_drought",
+    "anomaly_waterlogging",
+    "anomaly_fallow",
+    "anomaly_nonagri",
+]
+
 DERIVED_LAYER_META = {
+    "truecolor_preview_rgb": {
+        "legend": [{"kind": "note", "name": "真彩色影像（RGB 自然色）", "note": "Sentinel-2 红、绿、蓝波段组合；影像预览保留云、云影等真实观测像元。"}],
+    },
+    "falsecolor_preview_rgb": {
+        "legend": [{"kind": "note", "name": "假彩色影像（植被增强 NIR-R-G）", "note": "Sentinel-2 近红外、红、绿波段组合；影像预览保留云、云影等真实观测像元。"}],
+    },
     "truecolor_rgb": {
-        "legend": [{"kind": "note", "name": "影像RGB", "note": "Sentinel-2 真彩色影像，用于辅助判读作物分类和估产结果。"}],
+        "legend": [{"kind": "note", "name": "真彩色影像（RGB 自然色）", "note": "Sentinel-2 红、绿、蓝波段组合，接近人眼自然色观察效果。"}],
+    },
+    "falsecolor_rgb": {
+        "legend": [{"kind": "note", "name": "假彩色影像（植被增强 NIR-R-G）", "note": "Sentinel-2 近红外、红、绿波段组合，植被通常更醒目，适合辅助判读作物覆盖。"}],
     },
     "vitality_index_ndvi_rgb": {
         "legend": [
-            {"kind": "note", "name": "NDVI", "note": "归一化植被指数，红色代表低植被活力，绿色代表高植被活力。"},
             {"value": 1, "name": "低值", "color": "#d73027", "note": "植被覆盖低或长势弱。"},
             {"value": 2, "name": "中值", "color": "#fdae61", "note": "中等植被覆盖。"},
             {"value": 3, "name": "高值", "color": "#1a9850", "note": "植被覆盖和长势较好。"},
@@ -204,7 +233,6 @@ DERIVED_LAYER_META = {
     },
     "ndre_index_rgb": {
         "legend": [
-            {"kind": "note", "name": "NDRE", "note": "红边植被指数，对冠层叶绿素和作物活力变化更敏感。"},
             {"value": 1, "name": "低红边活力", "color": "#d73027", "note": "作物活力或叶绿素水平偏低。"},
             {"value": 2, "name": "中等红边活力", "color": "#fdae61", "note": "作物活力中等。"},
             {"value": 3, "name": "高红边活力", "color": "#1a9850", "note": "冠层活力较强。"},
@@ -229,7 +257,10 @@ DERIVED_LAYER_META = {
 }
 
 EXPORT_LAYER_NAMES = {
+    "truecolor_preview_rgb": "真彩色影像_RGB自然色_未云掩膜",
+    "falsecolor_preview_rgb": "假彩色影像_植被增强_NIR-R-G_未云掩膜",
     "truecolor_rgb": "影像RGB",
+    "falsecolor_rgb": "假彩色影像_植被增强_NIR-R-G",
     "vitality_index_ndvi_rgb": "NDVI",
     "ndre_index_rgb": "NDRE",
     "crop_yield_estimate_rgb": "产量空间差异彩色展示_RGB",
@@ -306,6 +337,38 @@ def choose_vector_file():
     return jsonify({"ok": True, "path": selected["path"]})
 
 
+@app.post("/api/choose-result-path")
+def choose_result_path():
+    current = (request.get_json(silent=True) or {}).get("current") or str(LOCAL_OUTPUT_DIR)
+    current_path = Path(current)
+    initial_dir = current_path.parent if current_path.is_file() else current_path
+    if not initial_dir.exists():
+        initial_dir = APP_DIR
+    selected = {"path": ""}
+
+    def open_dialog():
+        root = Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        filename = filedialog.askopenfilename(
+            initialdir=str(initial_dir),
+            title="选择已处理结果 ZIP/TIF，取消后可选择目录",
+            filetypes=[
+                ("处理结果", "*.zip *.tif *.tiff"),
+                ("ZIP 压缩包", "*.zip"),
+                ("GeoTIFF", "*.tif *.tiff"),
+                ("所有文件", "*.*"),
+            ],
+        )
+        selected["path"] = filename or filedialog.askdirectory(initialdir=str(initial_dir), title="选择已处理结果目录")
+        root.destroy()
+
+    thread = threading.Thread(target=open_dialog)
+    thread.start()
+    thread.join()
+    return jsonify({"ok": True, "path": selected["path"]})
+
+
 @app.get("/api/vector-bounds")
 def vector_bounds():
     path = request.args.get("path")
@@ -328,10 +391,18 @@ def acquisitions():
 @app.post("/api/aoi")
 def save_aoi():
     AOI_DIR.mkdir(parents=True, exist_ok=True)
-    if "file" in request.files:
-        uploaded = request.files["file"]
-        target = AOI_DIR / uploaded.filename
-        uploaded.save(target)
+    uploads = request.files.getlist("files") or request.files.getlist("file")
+    if uploads:
+        saved_paths = []
+        for uploaded in uploads:
+            if not uploaded or not uploaded.filename:
+                continue
+            target = AOI_DIR / Path(uploaded.filename).name
+            uploaded.save(target)
+            saved_paths.append(target)
+        shp_paths = [path for path in saved_paths if path.suffix.lower() == ".shp"]
+        target = shp_paths[0] if shp_paths else saved_paths[0]
+        _validate_vector_upload(target)
         return jsonify({"ok": True, "path": str(target), "bounds": _vector_bounds_wgs84(target), "geojson": _vector_preview_geojson(target)})
 
     payload = request.get_json(force=True)
@@ -383,6 +454,8 @@ def process_data():
 
     selected_outputs = params.get("selected_outputs") or []
     item_progress = {name: {"percent": 0, "status": "等待"} for name in selected_outputs}
+    requested_output_dir = Path(params.get("output_dir") or LOCAL_OUTPUT_DIR)
+    run_output_dir = _new_process_output_dir(requested_output_dir)
 
     def on_progress(progress: dict):
         percent = int(progress.get("percent", 0))
@@ -410,7 +483,7 @@ def process_data():
             metadata = run_local_processing(
                 raw_safe_dir=params.get("optical_safe_dir") or params.get("safe_dir") or LOCAL_SAFE_DIR,
                 radar_safe_dir=params.get("radar_safe_dir") or None,
-                output_dir=params.get("output_dir") or LOCAL_OUTPUT_DIR,
+                output_dir=str(run_output_dir),
                 selected_outputs=selected_outputs or None,
                 processing_params=params.get("processing_params") or {},
                 aoi_path=params.get("aoi_path") if params.get("process_scope") == "aoi" else None,
@@ -447,16 +520,37 @@ def stop_process():
     return jsonify({"ok": False, "message": "当前没有正在运行的处理任务"})
 
 
+def _new_process_output_dir(requested_output_dir: Path) -> Path:
+    default_output = Path(LOCAL_OUTPUT_DIR).resolve()
+    try:
+        requested_resolved = requested_output_dir.resolve()
+    except OSError:
+        requested_resolved = requested_output_dir
+    if requested_resolved != default_output:
+        return requested_output_dir
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return default_output.parent / "processed_runs" / f"run_{stamp}"
+
+
 @app.get("/api/layers")
 def layers():
     output_dir = Path(request.args.get("output_dir") or LOCAL_OUTPUT_DIR)
+    import_path = request.args.get("import_path")
+    if import_path:
+        try:
+            return jsonify({"ok": True, "items": _imported_tif_layers(import_path)})
+        except Exception as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+    metadata = _load_processing_metadata(output_dir)
+    selected_outputs = set(metadata.get("selected_outputs") or [])
     items = []
     for key, group in LAYER_GROUPS.items():
-        source_tif = _result_tif_path(output_dir, key)
-        if not source_tif.exists():
+        if selected_outputs and key not in selected_outputs and key not in {"truecolor_preview_rgb"}:
+            continue
+        source_tif = _group_bounds_source_tif(output_dir, key, group)
+        if source_tif is None:
             continue
         bounds = _tif_bounds_wgs84(source_tif)
-        meta = LAYER_META[key]
         children = []
         for child in group["children"]:
             child_key = child["key"]
@@ -478,8 +572,28 @@ def layers():
                 "bounds": bounds,
                 "png": f"/api/render/{key}.png?output_dir={output_dir}",
                 "tif": f"/api/tif/{key}?output_dir={output_dir}",
-                "legend": meta["legend"],
+                "legend": _layer_legend(key),
                 "children": children,
+            }
+        )
+    grouped_keys = set(LAYER_GROUPS)
+    for group in LAYER_GROUPS.values():
+        grouped_keys.update(child["key"] for child in group.get("children", []))
+    for key in SINGLE_LAYER_ORDER:
+        if key in grouped_keys or not _has_layer_asset(output_dir, key):
+            continue
+        if selected_outputs and key not in selected_outputs:
+            continue
+        bounds = _tif_bounds_wgs84(_result_tif_path(output_dir, key))
+        items.append(
+            {
+                "key": key,
+                "name": LAYER_META.get(key, {}).get("name", key),
+                "bounds": bounds,
+                "png": f"/api/render/{key}.png?output_dir={output_dir}",
+                "tif": f"/api/tif/{key}?output_dir={output_dir}",
+                "legend": _layer_legend(key),
+                "children": [],
             }
         )
     return jsonify({"ok": True, "items": items})
@@ -488,11 +602,27 @@ def layers():
 @app.get("/api/render/<layer>.png")
 def render_layer(layer: str):
     output_dir = Path(request.args.get("output_dir") or LOCAL_OUTPUT_DIR)
-    tif = _materialize_export_tif(output_dir, layer)
+    import_path = request.args.get("import_path")
+    if import_path:
+        tif = _imported_tif_by_key(import_path, layer)
+        if tif is None:
+            return jsonify({"ok": False, "error": f"导入 TIF 不存在：{layer}"}), 404
+        cache = _import_cache_dir(import_path) / "render_cache"
+        png = cache / f"{layer}_{DERIVED_RENDER_VERSION}.png"
+        color_overrides = _parse_color_overrides(request.args.get("colors"))
+        if color_overrides:
+            png = cache / f"{layer}_{DERIVED_RENDER_VERSION}_{abs(hash(json.dumps(color_overrides, sort_keys=True)))}.png"
+        if not png.exists() or png.stat().st_mtime < tif.stat().st_mtime:
+            png.parent.mkdir(parents=True, exist_ok=True)
+            meta = _meta_with_color_overrides(_generic_tif_meta(tif), color_overrides)
+            _render_tif_png(tif, png, meta)
+        return send_file(png, mimetype="image/png")
+    color_overrides = _parse_color_overrides(request.args.get("colors"))
+    render_tif = _derived_source_tif_path(output_dir, layer) if color_overrides and layer.endswith("_rgb") and layer not in NATIVE_RGB_LAYERS else None
+    tif = render_tif if render_tif is not None else _materialize_export_tif(output_dir, layer)
     if not tif.exists():
         return jsonify({"ok": False, "error": f"图层不存在：{layer}"}), 404
     png = output_dir / "render_cache" / f"{layer}_{DERIVED_RENDER_VERSION}.png"
-    color_overrides = _parse_color_overrides(request.args.get("colors"))
     if color_overrides:
         png = output_dir / "render_cache" / f"{layer}_{DERIVED_RENDER_VERSION}_{abs(hash(json.dumps(color_overrides, sort_keys=True)))}.png"
     if not png.exists() or png.stat().st_mtime < tif.stat().st_mtime:
@@ -505,6 +635,12 @@ def render_layer(layer: str):
 @app.get("/api/tif/<layer>")
 def tif_download(layer: str):
     output_dir = Path(request.args.get("output_dir") or LOCAL_OUTPUT_DIR)
+    import_path = request.args.get("import_path")
+    if import_path:
+        tif = _imported_tif_by_key(import_path, layer)
+        if tif is None:
+            return jsonify({"ok": False, "error": f"TIF 不存在：{layer}"}), 404
+        return send_file(tif, as_attachment=True, download_name=tif.name)
     tif = _materialize_export_tif(output_dir, layer)
     if not tif.exists():
         return jsonify({"ok": False, "error": f"TIF 不存在：{layer}"}), 404
@@ -543,18 +679,52 @@ def tif_batch_download():
 
 
 def _has_layer_asset(output_dir: Path, layer: str) -> bool:
+    if layer in NATIVE_RGB_LAYERS:
+        return _result_tif_path(output_dir, layer).exists()
     if layer.endswith("_rgb") or layer.endswith("_gray"):
         return _derived_source_tif_path(output_dir, layer).exists()
     return _result_tif_path(output_dir, layer).exists()
 
 
+def _group_bounds_source_tif(output_dir: Path, key: str, group: dict) -> Path | None:
+    source_tif = _result_tif_path(output_dir, key)
+    if source_tif.exists():
+        return source_tif
+    for child in group.get("children", []):
+        child_tif = _derived_source_tif_path(output_dir, child["key"])
+        if child_tif.exists():
+            return child_tif
+    return None
+
+
 def _layer_legend(layer: str) -> list[dict]:
+    meta = _layer_render_meta(layer)
+    if meta.get("type") == "class" and meta.get("colors"):
+        legend = DERIVED_LAYER_META.get(layer, {}).get("legend") if layer in DERIVED_LAYER_META else LAYER_META.get(layer, {}).get("legend")
+        if legend:
+            return _legend_with_render_colors(legend, meta)
     if layer in DERIVED_LAYER_META:
         return DERIVED_LAYER_META[layer]["legend"]
     if layer.endswith("_rgb") or layer.endswith("_gray"):
         base = layer.rsplit("_", 1)[0]
         return LAYER_META.get(base, {}).get("legend", [])
     return LAYER_META.get(layer, {}).get("legend", [])
+
+
+def _legend_with_render_colors(legend: list[dict], meta: dict) -> list[dict]:
+    colors = meta.get("colors", {})
+    out = []
+    for item in legend:
+        copied = dict(item)
+        value = copied.get("value")
+        if value in colors:
+            copied["color"] = _rgb_to_hex(colors[value][:3])
+        out.append(copied)
+    return out
+
+
+def _rgb_to_hex(rgb: tuple[int, int, int]) -> str:
+    return "#{:02x}{:02x}{:02x}".format(*[max(0, min(255, int(v))) for v in rgb])
 
 
 def _layer_render_meta(layer: str) -> dict:
@@ -577,6 +747,8 @@ def _result_tif_path(output_dir: Path, layer: str) -> Path:
 
 
 def _derived_source_tif_path(output_dir: Path, layer: str) -> Path:
+    if layer in NATIVE_RGB_LAYERS:
+        return _result_tif_path(output_dir, layer)
     if layer.endswith("_rgb"):
         return _result_tif_path(output_dir, layer[:-4])
     if layer.endswith("_gray"):
@@ -616,6 +788,120 @@ def _export_tif_name(output_dir: Path, layer: str) -> str:
     if tile_part:
         parts.append(tile_part)
     return "_".join(parts) + ".tif"
+
+
+def _import_cache_dir(import_path: str | Path) -> Path:
+    source = Path(import_path)
+    safe_name = _safe_filename(str(source.resolve() if source.exists() else source))
+    return IMPORTED_RESULTS_DIR / safe_name
+
+
+def _resolve_import_root(import_path: str | Path) -> Path:
+    source = Path(import_path)
+    if not source.exists():
+        raise FileNotFoundError(f"路径不存在：{source}")
+    if source.is_dir():
+        return source
+    suffix = source.suffix.lower()
+    if suffix in {".tif", ".tiff"}:
+        return source
+    if suffix != ".zip":
+        raise ValueError("仅支持已处理结果目录、.zip、.tif 或 .tiff")
+    target = _import_cache_dir(source) / "unzipped"
+    marker = target / ".extract_ok"
+    if not marker.exists() or marker.stat().st_mtime < source.stat().st_mtime:
+        if target.exists():
+            shutil.rmtree(target)
+        target.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(source) as zf:
+            for member in zf.infolist():
+                member_path = target / member.filename
+                if not str(member_path.resolve()).startswith(str(target.resolve())):
+                    raise ValueError(f"ZIP 包含非法路径：{member.filename}")
+            zf.extractall(target)
+        marker.write_text("ok", encoding="utf-8")
+    return target
+
+
+def _imported_tif_files(import_path: str | Path) -> list[Path]:
+    source = Path(import_path)
+    if source.is_file() and source.suffix.lower() in {".tif", ".tiff"}:
+        return [source]
+    root = _resolve_import_root(source)
+    if root.is_file() and root.suffix.lower() in {".tif", ".tiff"}:
+        return [root]
+    return sorted([p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in {".tif", ".tiff"}])
+
+
+def _imported_tif_key(path: Path, index: int) -> str:
+    return f"imported_{index}_{_safe_filename(path.stem)}"
+
+
+def _imported_tif_layers(import_path: str | Path) -> list[dict]:
+    items = []
+    for index, tif in enumerate(_imported_tif_files(import_path), 1):
+        try:
+            bounds = _tif_bounds_wgs84(tif)
+        except Exception:
+            continue
+        key = _imported_tif_key(tif, index)
+        query = f"import_path={quote(str(Path(import_path)))}"
+        items.append(
+            {
+                "key": key,
+                "name": tif.stem,
+                "bounds": bounds,
+                "png": f"/api/render/{key}.png?{query}",
+                "tif": f"/api/tif/{key}?{query}",
+                "legend": _imported_tif_legend(tif),
+                "children": [],
+            }
+        )
+    return items
+
+
+def _imported_tif_by_key(import_path: str | Path, key: str) -> Path | None:
+    for index, tif in enumerate(_imported_tif_files(import_path), 1):
+        if _imported_tif_key(tif, index) == key:
+            return tif
+    return None
+
+
+def _generic_tif_meta(tif: Path) -> dict:
+    with rasterio.open(tif) as ds:
+        if ds.count >= 3:
+            return {"type": "rgb"}
+        data = ds.read(1, masked=True).astype("float32")
+    values = data.compressed()
+    if values.size == 0:
+        return {"type": "gray"}
+    return {
+        "type": "gradient",
+        "min": float(np.nanpercentile(values, 2)),
+        "max": float(np.nanpercentile(values, 98)),
+        "gradient_low": (215, 48, 39),
+        "gradient_mid": (254, 224, 139),
+        "gradient_high": (26, 152, 80),
+    }
+
+
+def _imported_tif_legend(tif: Path) -> list[dict]:
+    name = tif.stem.lower()
+    for key in sorted(LAYER_META, key=len, reverse=True):
+        if key.lower() in name:
+            return _layer_legend(key)
+    if "ndvi" in name:
+        return _layer_legend("vitality_index_ndvi")
+    if "ndre" in name:
+        return _layer_legend("ndre_index")
+    if "yield" in name or "产量" in tif.stem or "估产" in tif.stem:
+        return _layer_legend("crop_yield_estimate")
+    if "crop_type" in name or "作物类型" in tif.stem:
+        return _layer_legend("crop_type_class")
+    with rasterio.open(tif) as ds:
+        if ds.count >= 3:
+            return [{"kind": "note", "name": tif.name, "note": "三波段 GeoTIFF，按 RGB 影像方式预览。"}]
+    return [{"kind": "note", "name": tif.name, "note": "已导入单波段 GeoTIFF，使用 2%-98% 分位数绿色渐变预览。"}]
 
 
 def _load_processing_metadata(output_dir: Path) -> dict:
@@ -688,7 +974,9 @@ def _start_download_job(params: dict, search_only: bool) -> None:
         product_type = (params.get("product_type", "SENTINEL-2-L2A") or "").upper()
         is_sentinel1 = "SENTINEL-1" in product_type
         provider = "ASF / Earthdata" if is_sentinel1 else "Copernicus Data Space"
-        JOBS["download"] = {"status": "running", "message": f"正在连接 {provider}", "items": [], "percent": 8, "progress_text": "连接中"}
+        selected_ids = _selected_product_ids(params)
+        item_progress = {product_id: {"percent": 0, "status": "等待下载"} for product_id in selected_ids}
+        JOBS["download"] = {"status": "running", "message": f"正在连接 {provider}", "items": [], "percent": 8, "progress_text": "连接中", "item_progress": item_progress}
         try:
             if is_sentinel1:
                 script = S1_ASF_DOWNLOAD_SCRIPT
@@ -706,30 +994,48 @@ def _start_download_job(params: dict, search_only: bool) -> None:
                 JOBS["download"].update({"percent": 18, "message": message, "progress_text": progress_text})
             process = subprocess.Popen(cmd, cwd=str(script.parent), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             DOWNLOAD_RUNTIME["process"] = process
+            stdout_lines = []
+            if process.stdout is not None:
+                for line in process.stdout:
+                    stdout_lines.append(line)
+                    _update_download_item_progress(line, item_progress)
             try:
-                stdout, stderr = process.communicate(timeout=7200)
+                stderr = process.stderr.read() if process.stderr is not None else ""
+                process.wait(timeout=7200)
             except subprocess.TimeoutExpired:
                 DOWNLOAD_RUNTIME["stop_requested"] = True
                 process.terminate()
                 try:
-                    stdout, stderr = process.communicate(timeout=10)
+                    process.wait(timeout=10)
                 except subprocess.TimeoutExpired:
                     process.kill()
-                    stdout, stderr = process.communicate()
+                    process.wait()
+                stderr = process.stderr.read() if process.stderr is not None else ""
+            stdout = "".join(stdout_lines)
             if DOWNLOAD_RUNTIME.get("stop_requested"):
                 message = "数据下载/检索任务已停止"
                 if is_sentinel1:
                     message = "Sentinel-1 ASF / NASA Earthdata 下载/检索任务已停止"
-                JOBS["download"] = {"status": "stopped", "message": message, "items": [], "percent": JOBS["download"].get("percent", 0), "progress_text": "已停止"}
+                JOBS["download"] = {"status": "stopped", "message": message, "items": [], "bounds": None, "geojson": None, "percent": JOBS["download"].get("percent", 0), "progress_text": "已停止", "item_progress": item_progress}
                 return
             status = "done" if process.returncode == 0 else "error"
+            search_results = _parse_search_results(stdout) if search_only and process.returncode == 0 else {"items": []}
             message = stdout[-4000:] if process.returncode == 0 else (stderr or stdout)[-4000:]
             if is_sentinel1:
                 message = _format_s1_asf_message(message)
-            JOBS["download"] = {"status": status, "message": message, "items": [], "percent": 100 if status == "done" else 0, "progress_text": "完成" if status == "done" else "失败"}
+            JOBS["download"] = {
+                "status": status,
+                "message": message,
+                "items": search_results.get("items", []),
+                "bounds": search_results.get("bounds"),
+                "geojson": search_results.get("geojson"),
+                "percent": 100 if status == "done" else 0,
+                "progress_text": "完成" if status == "done" else "失败",
+                "item_progress": item_progress,
+            }
         except Exception as exc:
             message = _format_s1_asf_message(str(exc)) if is_sentinel1 else str(exc)
-            JOBS["download"] = {"status": "error", "message": message, "items": [], "percent": 0, "progress_text": "失败"}
+            JOBS["download"] = {"status": "error", "message": message, "items": [], "bounds": None, "geojson": None, "percent": 0, "progress_text": "失败", "item_progress": item_progress}
         finally:
             DOWNLOAD_RUNTIME["process"] = None
             DOWNLOAD_RUNTIME["stop_requested"] = False
@@ -746,6 +1052,66 @@ def _format_s1_asf_message(message: str) -> str:
     cleaned = "\n".join(lines).strip()
     prefix = "Sentinel-1 正在使用 ASF / NASA Earthdata 检索下载。\n"
     return prefix + cleaned if cleaned else prefix.strip()
+
+
+def _update_download_item_progress(line: str, item_progress: dict) -> None:
+    if DOWNLOAD_PROGRESS_MARKER not in line:
+        return
+    raw = line.split(DOWNLOAD_PROGRESS_MARKER, 1)[1].strip()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return
+    product_id = str(data.get("id") or "").strip()
+    if not product_id:
+        return
+    percent = max(0, min(100, int(data.get("percent") or 0)))
+    item_progress[product_id] = {"percent": percent, "status": data.get("status") or "下载中"}
+    JOBS["download"]["item_progress"] = item_progress
+    if item_progress:
+        values = [int(item.get("percent") or 0) for item in item_progress.values()]
+        JOBS["download"]["percent"] = max(18, min(99, int(sum(values) / max(len(values), 1))))
+    JOBS["download"]["progress_text"] = f"{data.get('status') or '下载中'} {percent}%"
+
+
+def _parse_search_results(stdout: str) -> dict:
+    payload = {"items": [], "bounds": None, "geojson": None}
+    for line in (stdout or "").splitlines():
+        if SEARCH_JSON_MARKER not in line:
+            continue
+        raw = line.split(SEARCH_JSON_MARKER, 1)[1].strip()
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        items = data.get("items") or []
+        payload["items"] = items
+        payload["bounds"] = _merge_item_bounds(items)
+        payload["geojson"] = {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "properties": {k: v for k, v in item.items() if k not in {"geometry", "bounds"}},
+                    "geometry": item["geometry"],
+                }
+                for item in items
+                if item.get("geometry")
+            ],
+        }
+        break
+    return payload
+
+
+def _merge_item_bounds(items: list[dict]) -> list[list[float]] | None:
+    bounds = [item.get("bounds") for item in items if item.get("bounds")]
+    if not bounds:
+        return None
+    south = min(bound[0][0] for bound in bounds)
+    west = min(bound[0][1] for bound in bounds)
+    north = max(bound[1][0] for bound in bounds)
+    east = max(bound[1][1] for bound in bounds)
+    return [[south, west], [north, east]]
 
 
 def _build_cdse_download_cmd(params: dict, search_only: bool) -> list[str]:
@@ -773,6 +1139,11 @@ def _build_cdse_download_cmd(params: dict, search_only: bool) -> list[str]:
         cmd.extend(["--collection", collection])
     if params.get("contains"):
         cmd.extend(["--contains", params["contains"]])
+    if params.get("cloud_max") not in ("", None):
+        cmd.extend(["--cloud-max", str(params["cloud_max"])])
+    selected_product_ids = _selected_product_ids(params)
+    if selected_product_ids:
+        cmd.extend(["--product-ids", ",".join(selected_product_ids)])
     if search_only:
         cmd.append("--search-only")
     return cmd
@@ -826,6 +1197,22 @@ def _optional_positive_int(value) -> int | None:
     return parsed if parsed > 0 else None
 
 
+def _selected_product_ids(params: dict) -> list[str]:
+    raw = params.get("selected_product_ids") or []
+    if isinstance(raw, str):
+        raw = raw.replace(",", " ").split()
+    if not isinstance(raw, list):
+        return []
+    seen = set()
+    out = []
+    for value in raw:
+        product_id = str(value or "").strip()
+        if product_id and product_id not in seen:
+            seen.add(product_id)
+            out.append(product_id)
+    return out
+
+
 def _download_sentinel2_collection(product_type: str) -> str:
     product_type = (product_type or "").upper()
     if product_type == "SENTINEL-2-L1C":
@@ -852,13 +1239,15 @@ def _meta_with_color_overrides(meta: dict, overrides: dict[int, str]) -> dict:
         alpha = copied["colors"].get(value, (0, 0, 0, 190))[3]
         copied["colors"][value] = (*_hex_to_rgb(hex_color), alpha)
     if copied.get("type") == "gradient":
-        legend = copied.get("legend", [])
-        if legend:
-            sorted_values = sorted(overrides)
-            if sorted_values:
-                copied["gradient_low"] = _hex_to_rgb(overrides[sorted_values[0]])
-                copied["gradient_mid"] = _hex_to_rgb(overrides[sorted_values[len(sorted_values) // 2]])
-                copied["gradient_high"] = _hex_to_rgb(overrides[sorted_values[-1]])
+        legend_items = [item for item in copied.get("legend", []) if item.get("value") is not None]
+        if legend_items:
+            vmin = float(copied.get("min", 0))
+            vmax = float(copied.get("max", 1))
+            positions = np.linspace(vmin, vmax, len(legend_items))
+            copied["gradient_stops"] = [
+                (float(position), _hex_to_rgb(overrides.get(item["value"], item.get("color", "#000000"))))
+                for position, item in zip(positions, legend_items)
+            ]
     return copied
 
 
@@ -888,8 +1277,12 @@ def _write_gray_preview_tif(source_tif: Path, target_tif: Path) -> None:
             valid &= band != src.nodata
         out = np.zeros(band.shape, dtype="uint8")
         if np.any(valid):
-            vmin = float(np.nanmin(band[valid]))
-            vmax = float(np.nanmax(band[valid]))
+            values = band[valid]
+            vmin = float(np.nanpercentile(values, 2))
+            vmax = float(np.nanpercentile(values, 98))
+            if vmax <= vmin:
+                vmin = float(np.nanmin(values))
+                vmax = float(np.nanmax(values))
             scaled = np.clip((band - vmin) / max(vmax - vmin, 1e-6), 0, 1)
             out[valid] = (1 + scaled[valid] * 254).astype("uint8")
         profile = src.profile.copy()
@@ -927,6 +1320,17 @@ def _vector_bounds_wgs84(path: Path) -> list[list[float]]:
     xs = [xy[0] for xy in coords]
     ys = [xy[1] for xy in coords]
     return [[min(ys), min(xs)], [max(ys), max(xs)]]
+
+
+def _validate_vector_upload(path: Path) -> None:
+    if path.suffix.lower() != ".shp":
+        return
+    required = [".shp", ".shx", ".dbf"]
+    missing = [suffix for suffix in required if not path.with_suffix(suffix).exists()]
+    if missing:
+        raise ValueError(f"SHP 上传不完整：缺少同名配套文件 {'、'.join(missing)}。请同时选择 .shp、.shx、.dbf、.prj 后上传。")
+    if not path.with_suffix(".prj").exists():
+        raise ValueError("SHP 缺少 .prj 投影文件，无法可靠转换为经纬度检索区域。请同时上传同名 .prj，或先转换为 EPSG:4326 GeoJSON。")
 
 
 def _vector_preview_geojson(path: Path) -> dict:
@@ -1001,9 +1405,13 @@ def _render_tif_png(tif: Path, png: Path, meta: dict) -> None:
         out_width = max(1, int(ds.width / scale))
         out_height = max(1, int(ds.height / scale))
         if ds.count >= 3:
-            rgb = ds.read([1, 2, 3], out_shape=(3, out_height, out_width), resampling=Resampling.nearest)
-            rgb = np.transpose(rgb, (1, 2, 0)).astype("uint8")
-            alpha = np.where(np.any(rgb > 0, axis=2), 185, 0).astype("uint8")
+            raw = ds.read([1, 2, 3], out_shape=(3, out_height, out_width), resampling=Resampling.nearest)
+            if _is_display_rgb(raw):
+                rgb_bands = np.clip(raw, 0, 255).astype("uint8")
+            else:
+                rgb_bands = _stretch_render_rgb(raw.astype("float32"))
+            rgb = np.transpose(rgb_bands, (1, 2, 0)).astype("uint8")
+            alpha = np.where(np.any(raw > 0, axis=0), RESULT_PNG_ALPHA, 0).astype("uint8")
             rgba = np.dstack([rgb, alpha])
             Image.fromarray(rgba, mode="RGBA").save(png)
             return
@@ -1022,6 +1430,32 @@ def _render_tif_rgb_data(tif: Path, meta: dict) -> np.ndarray:
     return np.transpose(rgba[..., :3], (2, 0, 1))
 
 
+def _is_display_rgb(raw: np.ndarray) -> bool:
+    if np.issubdtype(raw.dtype, np.integer) and raw.dtype.itemsize == 1:
+        return True
+    finite = raw[np.isfinite(raw)]
+    if finite.size == 0:
+        return False
+    return float(np.nanmin(finite)) >= 0 and float(np.nanmax(finite)) <= 255
+
+
+def _stretch_render_rgb(raw: np.ndarray) -> np.ndarray:
+    rgb = np.zeros(raw.shape, dtype=np.uint8)
+    valid = np.all(np.isfinite(raw), axis=0) & np.any(raw > 0, axis=0)
+    if not np.any(valid):
+        return rgb
+    for band_index in range(raw.shape[0]):
+        band = raw[band_index]
+        values = band[valid]
+        low = float(np.nanpercentile(values, 2))
+        high = float(np.nanpercentile(values, 98))
+        scaled = np.clip((band - low) / max(high - low, 1e-6), 0, 1)
+        scaled = np.power(scaled, 1.05)
+        rgb[band_index] = (scaled * 255).astype(np.uint8)
+    rgb[:, ~valid] = 0
+    return rgb
+
+
 def _render_single_band_rgba(data: np.ndarray, nodata, meta: dict) -> np.ndarray:
     rgba = np.zeros((data.shape[0], data.shape[1], 4), dtype=np.uint8)
     valid = np.ones(data.shape, dtype=bool)
@@ -1034,25 +1468,42 @@ def _render_single_band_rgba(data: np.ndarray, nodata, meta: dict) -> np.ndarray
         rgba[..., 0] = gray
         rgba[..., 1] = gray
         rgba[..., 2] = gray
-        rgba[..., 3] = np.where(valid & (gray > 0), 185, 0).astype(np.uint8)
+        rgba[..., 3] = np.where(valid & (gray > 0), RESULT_PNG_ALPHA, 0).astype(np.uint8)
+    elif meta.get("type") == "threshold":
+        breaks = [float(value) for value in meta.get("breaks", [])]
+        colors = meta.get("colors", {})
+        classes = np.ones(data.shape, dtype=np.uint8)
+        if len(breaks) >= 1:
+            classes[data > breaks[0]] = 2
+        if len(breaks) >= 2:
+            classes[data > breaks[1]] = 3
+        for value, color in colors.items():
+            rgba[valid & (classes == int(value))] = color
     elif meta.get("type") == "gradient":
         vmin = float(meta.get("min", np.nanmin(data[valid]) if np.any(valid) else 0))
         vmax = float(meta.get("max", np.nanmax(data[valid]) if np.any(valid) else 1))
-        norm = np.clip((data.astype("float32") - vmin) / max(vmax - vmin, 1e-6), 0, 1)
-        low = meta.get("gradient_low", (215, 48, 39))
-        mid = meta.get("gradient_mid", (253, 174, 97))
-        high = meta.get("gradient_high", (26, 152, 80))
-        lower = norm <= 0.5
-        upper = ~lower
-        t_low = np.clip(norm / 0.5, 0, 1)
-        t_high = np.clip((norm - 0.5) / 0.5, 0, 1)
-        for channel in range(3):
-            rgba[..., channel] = np.where(
-                lower,
-                low[channel] * (1 - t_low) + mid[channel] * t_low,
-                mid[channel] * (1 - t_high) + high[channel] * t_high,
-            ).astype(np.uint8)
-        rgba[..., 3] = np.where(valid, 185, 0).astype(np.uint8)
+        stops = meta.get("gradient_stops")
+        if stops:
+            values = [float(item[0]) for item in stops]
+            colors = [item[1] for item in stops]
+            scaled = np.clip(data.astype("float32"), min(values), max(values))
+            for channel in range(3):
+                rgba[..., channel] = np.interp(scaled, values, [color[channel] for color in colors]).astype(np.uint8)
+        else:
+            norm = np.clip((data.astype("float32") - vmin) / max(vmax - vmin, 1e-6), 0, 1)
+            low = meta.get("gradient_low", (215, 48, 39))
+            mid = meta.get("gradient_mid", (253, 174, 97))
+            high = meta.get("gradient_high", (26, 152, 80))
+            lower = norm <= 0.5
+            t_low = np.clip(norm / 0.5, 0, 1)
+            t_high = np.clip((norm - 0.5) / 0.5, 0, 1)
+            for channel in range(3):
+                rgba[..., channel] = np.where(
+                    lower,
+                    low[channel] * (1 - t_low) + mid[channel] * t_low,
+                    mid[channel] * (1 - t_high) + high[channel] * t_high,
+                ).astype(np.uint8)
+        rgba[..., 3] = np.where(valid, RESULT_PNG_ALPHA, 0).astype(np.uint8)
     else:
         for value, color in meta.get("colors", {}).items():
             rgba[data == value] = color

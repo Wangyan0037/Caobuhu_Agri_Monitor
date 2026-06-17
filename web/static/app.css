@@ -27,6 +27,20 @@ input, select { width: 100%; height: 34px; border: 1px solid #cbd8cb; border-rad
 .progress-bar { height: 9px; background: #dce8dc; border-radius: 999px; overflow: hidden; border: 1px solid #c8d9c8; }
 #downloadProgress { height: 100%; width: 0%; background: linear-gradient(90deg, #1f7a4d, #a6c85f); transition: width .25s ease; }
 #downloadProgressText { font-size: 12px; color: #435143; text-align: right; white-space: nowrap; }
+.search-result-list { display: grid; gap: 8px; margin-top: 12px; max-height: 260px; overflow: auto; }
+.search-result-item { border: 1px solid #dfe8df; border-radius: 6px; padding: 8px; background: #fbfdfb; cursor: pointer; }
+.search-selection-tools { display: grid; grid-template-columns: 1fr 72px; gap: 8px; align-items: center; border: 1px solid #dfe8df; border-radius: 6px; padding: 8px; background: #eef6ee; }
+.search-selection-tools small { grid-column: 1 / -1; color: #607061; font-size: 11px; }
+.search-result-title { display: grid; grid-template-columns: auto 1fr; gap: 8px; align-items: start; cursor: pointer; }
+.search-result-title input { width: auto; height: auto; margin-top: 2px; }
+.search-result-item strong { display: block; font-size: 12px; color: #123524; overflow-wrap: anywhere; }
+.search-result-item small { display: block; margin-top: 3px; color: #607061; font-size: 11px; }
+.search-result-item.active { border-color: #1f7a4d; box-shadow: 0 0 0 2px rgba(31,122,77,.12); }
+.download-item-progress { position: relative; height: 17px; margin-top: 7px; border: 1px solid #c8d9c8; border-radius: 999px; background: #edf4ed; overflow: hidden; }
+.download-item-progress-fill { height: 100%; width: 0%; background: linear-gradient(90deg, #1f7a4d, #a6c85f); transition: width .25s ease; }
+.download-item-progress span { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 11px; color: #17231a; font-weight: 700; }
+.search-preview { margin-top: 8px; border-top: 1px dashed #d8e5d8; padding-top: 8px; }
+.search-preview img { display: block; width: 100%; max-height: 160px; object-fit: cover; border-radius: 4px; background: #e7eee7; }
 .status { background: #17231a; color: #d6ead7; padding: 14px; border-radius: 8px; }
 .status h2 { color: white; }
 pre { white-space: pre-wrap; margin: 0; font-size: 12px; max-height: 220px; overflow: auto; }

@@ -28,7 +28,7 @@
       <section id="downloadPanel" class="panel active">
         <h2>区域与检索</h2>
         <label>区域文件</label>
-        <input id="aoiFile" type="file" accept=".geojson,.json,.shp">
+        <input id="aoiFile" type="file" accept=".geojson,.json,.shp,.shx,.dbf,.prj,.cpg" multiple>
         <div class="button-row single">
           <button id="saveDrawnAoi" class="secondary">保存地图绘制区域</button>
         </div>
@@ -46,6 +46,8 @@
         </select>
         <label>产品名过滤</label>
         <input id="contains" placeholder="例如 T49RFP, T49RFQ">
+        <label>云量过滤</label>
+        <input id="cloudMax" type="number" min="0" max="100" step="1" value="30" placeholder="例如 30 表示云盖量 < 30%">
         <div class="grid-2">
           <div><label>最多检索</label><input id="limit" type="number" min="1" placeholder="不填则使用默认值"></div>
           <div><label>并发下载</label><input id="workers" type="number" min="1" max="10" value="2"></div>
@@ -69,6 +71,8 @@
           <button id="downloadBtn">数据下载</button>
           <button id="stopDownloadBtn" class="danger">停止下载</button>
         </div>
+        <label class="checkline compact"><input id="showSearchCoverage" type="checkbox"> 显示下载检索覆盖范围</label>
+        <div id="searchResultList" class="search-result-list"></div>
       </section>
 
       <section id="processPanel" class="panel">
@@ -106,12 +110,21 @@
         <div class="param-card">
           <h3>通用质量过滤</h3>
           <div class="param-grid">
-            <label>云/阴影 SCL 排除值<input data-param="scl_excluded_classes" type="text" value="0,1,3,8,9,10,11"></label>
+            <label>云/阴影 SCL 排除值<input data-param="scl_excluded_classes" type="text" value="0,1,3,9,11"></label>
             <label>最小有效反射率<input data-param="reflectance_min" type="number" step="0.001" placeholder="默认不过滤"></label>
             <label>最大有效反射率<input data-param="reflectance_max" type="number" step="0.01" placeholder="默认不过滤"></label>
             <label>最小有效像元比例<input data-param="min_valid_ratio" type="number" step="0.01" placeholder="默认不限制"></label>
             <label>输出分辨率（米）<input data-param="output_resolution_m" type="number" step="10" value="10"></label>
-            <label>重采样方法<select data-param="resampling_method"><option value="bilinear">bilinear</option><option value="nearest">nearest</option><option value="cubic">cubic</option></select></label>
+            <label>重采样方法
+              <select data-param="resampling_method">
+                <option value="bilinear">bilinear</option>
+                <option value="nearest">nearest</option>
+                <option value="cubic">cubic</option>
+              </select>
+            </label>
+            <label>RGB 最小反射率<input data-param="truecolor_reflectance_min" type="number" step="0.001" placeholder="默认不过滤"></label>
+            <label>RGB 最大反射率<input data-param="truecolor_reflectance_max" type="number" step="0.01" placeholder="默认不过滤"></label>
+            <label>RGB Gamma<input data-param="truecolor_gamma" type="number" step="0.05" value="1.0"></label>
           </div>
         </div>
 
@@ -153,10 +166,10 @@
           <article class="process-item" data-output-item="patrol_priority">
             <label class="checkline"><input type="checkbox" class="process-output" value="patrol_priority"> 巡田优先级</label>
             <div class="mini-grid">
-              <label>中优先级阈值<input data-param="priority_medium_score" type="number" step="0.1" value="1.5"></label>
-              <label>高优先级阈值<input data-param="priority_high_score" type="number" step="0.1" value="2.5"></label>
-              <label>贴近道路权重<input data-param="road_proximity_weight" type="number" step="0.1" value="0.0"></label>
-              <label>连续异常加权<input data-param="persistent_anomaly_weight" type="number" step="0.1" value="0.5"></label>
+              <label>LAI 推算系数<input data-param="patrol_lai_scale" type="number" step="0.1" value="6.0"></label>
+              <label>差 NDVI<input data-param="vitality_poor_ndvi" type="number" step="0.01" value="0.20"></label>
+              <label>弱 NDVI<input data-param="vitality_weak_ndvi" type="number" step="0.01" value="0.35"></label>
+              <label>正常 NDVI<input data-param="vitality_normal_ndvi" type="number" step="0.01" value="0.55"></label>
             </div>
             <div class="item-progress"><div class="item-progress-fill"></div><span>等待</span></div>
           </article>
@@ -183,8 +196,8 @@
           <article class="process-item" data-output-item="crop_type_class">
             <label class="checkline"><input type="checkbox" class="process-output" value="crop_type_class"> 作物类型分类</label>
             <div class="mini-grid">
-              <label>水体 NDWI 阈值<input data-param="crop_water_ndwi_min" type="number" step="0.01" value="0.18"></label>
-              <label>水体 NDVI 上限<input data-param="crop_water_ndvi_max" type="number" step="0.01" value="0.20"></label>
+              <label>水体 NDWI 阈值<input data-param="crop_water_ndwi_min" type="number" step="0.01" value="0.10"></label>
+              <label>水体 NDVI 上限<input data-param="crop_water_ndvi_max" type="number" step="0.01" value="0.28"></label>
               <label>疑似水稻 NDVI 下限<input data-param="crop_rice_ndvi_min" type="number" step="0.01" value="0.45"></label>
               <label>疑似水稻 LSWI 下限<input data-param="crop_rice_lswi_min" type="number" step="0.01" value="0.10"></label>
             </div>
@@ -250,9 +263,15 @@
       <section id="layerPanel" class="panel">
         <h2>地图叠加</h2>
         <label class="checkline compact"><input id="showBoundaryPreview" type="checkbox" checked> 显示处理范围边界预览</label>
+        <label>已处理 ZIP/TIF/目录路径</label>
+        <div class="path-row">
+          <input id="importResultPath" placeholder="可选择已下载完成的处理结果压缩包、TIF 或目录">
+          <button id="chooseImportResultPath" class="secondary">选择</button>
+        </div>
         <div class="button-row">
           <button id="loadLayersBtn">加载处理结果</button>
           <button id="batchExportBtn" class="secondary">批量导出 TIF</button>
+          <button id="clearImportedLayersBtn" class="secondary">移除加载数据</button>
         </div>
         <div id="layerList" class="layer-list"></div>
       </section>

@@ -145,6 +145,50 @@ def build_search_params(args):
     return params
 
 
+def feature_bounds(geometry):
+    if not geometry:
+        return None
+    coords = []
+
+    def collect(value):
+        if not value:
+            return
+        if isinstance(value[0], (int, float)):
+            coords.append(value)
+            return
+        for item in value:
+            collect(item)
+
+    collect(geometry.get("coordinates", []))
+    if not coords:
+        return None
+    xs = [xy[0] for xy in coords]
+    ys = [xy[1] for xy in coords]
+    return [[min(ys), min(xs)], [max(ys), max(xs)]]
+
+
+def emit_search_results(features):
+    items = []
+    for feature in features:
+        prop = feature.get("properties", {})
+        scene = prop.get("sceneName") or prop.get("fileID") or prop.get("granuleName")
+        geometry = feature.get("geometry")
+        items.append(
+            {
+                "id": scene,
+                "title": scene,
+                "datetime": prop.get("startTime"),
+                "collection": "SENTINEL-1",
+                "processing_level": prop.get("processingLevel"),
+                "polarization": prop.get("polarization"),
+                "geometry": geometry,
+                "bounds": feature_bounds(geometry),
+                "preview": prop.get("browse") or prop.get("thumbnail") or "",
+            }
+        )
+    print("__SEARCH_RESULTS_JSON__" + json.dumps({"items": items}, ensure_ascii=False))
+
+
 def extract_zip(zip_path, extract_dir):
     zip_path = Path(zip_path)
     extract_dir = Path(extract_dir)
@@ -297,6 +341,7 @@ def main():
         print(f"  {i}. {prop.get('sceneName')} | {prop.get('processingLevel')} | {prop.get('polarization')} | {prop.get('startTime')}")
 
     if args.search_only:
+        emit_search_results(features)
         return
 
     output_dir = Path(args.output_dir)

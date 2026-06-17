@@ -1,4 +1,4 @@
-const state = { drawn: null, overlays: {}, layers: [], aoiLayer: null, layerColors: {} };
+const state = { drawn: null, overlays: {}, layers: [], aoiLayer: null, searchCoverageLayer: null, searchCoverageGeojson: null, layerColors: {}, searchItems: [] };
 const $ = (id) => document.getElementById(id);
 
 const map = L.map("map", { center: [35.8617, 104.1954], zoom: 4, zoomControl: true, attributionControl: false });
@@ -53,6 +53,9 @@ document.querySelectorAll(".tab").forEach(btn => {
     document.querySelectorAll(".panel").forEach(p => p.classList.remove("active"));
     btn.classList.add("active");
     $(btn.dataset.panel).classList.add("active");
+    if (btn.dataset.panel !== "downloadPanel" && $("showSearchCoverage") && !$("showSearchCoverage").checked) {
+      setSearchCoverageVisible(false);
+    }
   });
 });
 
@@ -122,11 +125,25 @@ $("showBoundaryPreview").onchange = () => {
   else map.removeLayer(state.aoiLayer);
 };
 
+$("showSearchCoverage").onchange = () => setSearchCoverageVisible($("showSearchCoverage").checked);
+
+function setSearchCoverageVisible(visible) {
+  if (state.searchCoverageLayer) {
+    map.removeLayer(state.searchCoverageLayer);
+    state.searchCoverageLayer = null;
+  }
+  if (!visible || !state.searchCoverageGeojson) return;
+  state.searchCoverageLayer = L.geoJSON(state.searchCoverageGeojson, {
+    style: { color: "#00a6d6", weight: 2, fillColor: "#00a6d6", fillOpacity: 0.10 }
+  }).addTo(map);
+}
+
 $("aoiFile").addEventListener("change", async () => {
-  const file = $("aoiFile").files[0];
-  if (!file) return;
+  const files = Array.from($("aoiFile").files || []);
+  if (!files.length) return;
   const fd = new FormData();
-  fd.append("file", file);
+  files.forEach(file => fd.append("files", file));
+  fd.append("file", files[0]);
   const res = await fetch("/api/aoi", { method: "POST", body: fd }).then(r => r.json());
   if (res.ok) {
     $("aoiPath").value = res.path;
@@ -196,6 +213,20 @@ $("chooseSafeDir").onclick = () => chooseFolder("downloadSafeDir");
 $("chooseOpticalSafeDir").onclick = () => chooseFolder("opticalSafeDir");
 $("chooseRadarSafeDir").onclick = () => chooseFolder("radarSafeDir");
 $("chooseOutputDir").onclick = () => chooseFolder("outputDir");
+$("chooseImportResultPath").onclick = async () => {
+  const current = $("importResultPath").value || $("outputDir").value || "";
+  const res = await fetch("/api/choose-result-path", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ current })
+  }).then(r => r.json());
+  if (res.ok && res.path) {
+    $("importResultPath").value = res.path;
+    log(`已选择历史处理结果：${res.path}`);
+  } else if (res.error) {
+    log(res.error);
+  }
+};
 $("chooseProcessScopeFile").onclick = async () => {
   await chooseVectorFile("processScopeFilePath");
   if ($("processScopeFilePath").value) $("processAoiPath").value = $("processScopeFilePath").value;
@@ -244,21 +275,33 @@ $("syncProcessAoi").onclick = async () => {
   }
 };
 
-function downloadParams() {
+function downloadParams(includeSelectedProducts = false) {
   const workers = Math.max(1, Math.min(10, Number($("workers").value || 2)));
   $("workers").value = workers;
   const rawLimit = $("limit").value.trim();
-  return {
+  const params = {
     aoi_path: $("aoiPath").value,
     start_date: $("startDate").value,
     end_date: $("endDate").value,
     product_type: $("productType").value,
     contains: $("contains").value,
+    cloud_max: $("cloudMax").value,
     limit: rawLimit ? Number(rawLimit) : "",
     max_workers: workers,
     safe_dir: $("downloadSafeDir").value || $("opticalSafeDir").value,
     zip_dir: $("zipDir").value
   };
+  if (includeSelectedProducts) {
+    const selectedIds = selectedSearchProductIds();
+    if (selectedIds !== null) params.selected_product_ids = selectedIds;
+  }
+  return params;
+}
+
+function selectedSearchProductIds() {
+  const checkboxes = Array.from(document.querySelectorAll(".search-result-check"));
+  if (!checkboxes.length) return null;
+  return checkboxes.filter(input => input.checked).map(input => input.value);
 }
 
 $("searchBtn").onclick = async () => {
@@ -268,8 +311,14 @@ $("searchBtn").onclick = async () => {
 };
 
 $("downloadBtn").onclick = async () => {
+  const payload = downloadParams(true);
+  if (Array.isArray(payload.selected_product_ids) && !payload.selected_product_ids.length) {
+    log("请至少勾选一个需要下载的数据产品。");
+    return;
+  }
+  resetDownloadItemProgress(payload.selected_product_ids || []);
   setProgress(5, "正在提交下载任务");
-  await fetch("/api/download", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(downloadParams()) });
+  await fetch("/api/download", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload) });
   pollDownload();
 };
 
@@ -295,9 +344,44 @@ async function pollDownload() {
       }
     }
     setProgress(percent, progressText);
+    updateDownloadItemProgress(s.item_progress || {});
     log(`数据下载/检索：${s.status}\n${message}`);
-    if (s.status !== "running" && s.status !== "stopping") clearInterval(timer);
+    if (s.status !== "running" && s.status !== "stopping") {
+      clearInterval(timer);
+      if ((s.items || []).length) renderSearchResults(s);
+      else updateDownloadItemProgress(s.item_progress || {});
+    }
   }, 1200);
+}
+
+function resetDownloadItemProgress(selectedIds) {
+  const selected = new Set(selectedIds);
+  document.querySelectorAll(".search-result-item[data-product-id]").forEach(card => {
+    const productId = card.dataset.productId;
+    const fill = card.querySelector(".download-item-progress-fill");
+    const text = card.querySelector(".download-item-progress span");
+    if (!fill || !text) return;
+    fill.style.width = "0%";
+    text.textContent = selected.has(productId) ? "等待下载 0%" : "未选择";
+  });
+}
+
+function updateDownloadItemProgress(itemProgress) {
+  Object.entries(itemProgress || {}).forEach(([productId, info]) => {
+    const card = document.querySelector(`.search-result-item[data-product-id="${cssEscape(productId)}"]`);
+    if (!card) return;
+    const fill = card.querySelector(".download-item-progress-fill");
+    const text = card.querySelector(".download-item-progress span");
+    if (!fill || !text) return;
+    const percent = Math.max(0, Math.min(100, Number(info.percent || 0)));
+    fill.style.width = `${percent}%`;
+    text.textContent = `${info.status || "下载中"} ${percent}%`;
+  });
+}
+
+function cssEscape(value) {
+  if (window.CSS && CSS.escape) return CSS.escape(value);
+  return String(value).replace(/["\\]/g, "\\$&");
 }
 
 function controlValue(input) {
@@ -375,6 +459,13 @@ $("processBtn").onclick = async () => {
     if (s.status !== "running") {
       clearInterval(timer);
       updateItemProgress(s.item_progress);
+      if (s.status === "done" && s.metadata && s.metadata.output_dir) {
+        $("outputDir").value = s.metadata.output_dir;
+        if ($("importResultPath")) $("importResultPath").value = "";
+        clearOverlays();
+        state.layers = [];
+        $("layerList").innerHTML = "";
+      }
       log(`数据处理：${s.status}\n${s.message || ""}\n处理完成后可在“结果图层”中手动加载。`);
     }
   }, 1000);
@@ -390,12 +481,33 @@ $("batchExportBtn").onclick = () => {
   const out = $("outputDir").value || "";
   window.location.href = `/api/tif-batch?output_dir=${encodeURIComponent(out)}`;
 };
+$("clearImportedLayersBtn").onclick = () => {
+  $("importResultPath").value = "";
+  clearOverlays();
+  state.layers = [];
+  state.layerColors = {};
+  $("layerList").innerHTML = "";
+  $("legend").classList.add("hidden");
+  log("已移除当前加载的结果图层。");
+};
 
 async function loadLayers() {
   const out = $("outputDir").value || "";
-  const res = await fetch(`/api/layers?output_dir=${encodeURIComponent(out)}`).then(r => r.json());
-  if (!res.ok) return;
+  const importPath = $("importResultPath") ? $("importResultPath").value.trim() : "";
+  const params = importPath ? `import_path=${encodeURIComponent(importPath)}` : `output_dir=${encodeURIComponent(out)}`;
+  let res;
+  try {
+    const response = await fetch(`/api/layers?${params}`);
+    res = await response.json();
+    if (!response.ok || !res.ok) {
+      throw new Error(res.error || res.message || `HTTP ${response.status}`);
+    }
+  } catch (error) {
+    log(`加载处理结果失败：${error.message || error}`);
+    return;
+  }
   clearOverlays();
+  state.layerColors = {};
   state.layers = res.items;
   $("layerList").innerHTML = "";
   res.items.forEach(layer => addLayerControl(layer, false));
@@ -404,12 +516,97 @@ async function loadLayers() {
   log(`已发现 ${res.items.length} 个处理结果图层，请勾选后叠加到地图。`);
 }
 
+function renderSearchResults(result) {
+  const list = $("searchResultList");
+  if (!list) return;
+  const items = result.items || [];
+  state.searchItems = items;
+  list.innerHTML = "";
+  if (state.searchCoverageLayer) {
+    map.removeLayer(state.searchCoverageLayer);
+    state.searchCoverageLayer = null;
+  }
+  state.searchCoverageGeojson = result.geojson || null;
+  if (result.geojson && result.geojson.features && result.geojson.features.length) {
+    setSearchCoverageVisible($("showSearchCoverage") && $("showSearchCoverage").checked);
+  }
+  if (result.bounds) map.fitBounds(result.bounds, { padding: [30, 30] });
+  if (!items.length) {
+    list.innerHTML = `<div class="search-result-item"><strong>未获取到可显示的数据覆盖范围</strong><small>请检查检索条件或后端检索输出。</small></div>`;
+    return;
+  }
+  const tools = document.createElement("div");
+  tools.className = "search-selection-tools";
+  tools.innerHTML = `
+    <label class="checkline compact"><input id="selectAllSearchResults" type="checkbox" checked> 全选检索结果</label>
+    <button id="invertSearchSelection" class="secondary" type="button">反选</button>
+    <small id="searchSelectionCount"></small>
+  `;
+  list.appendChild(tools);
+  items.forEach((item, index) => {
+    const card = document.createElement("div");
+    card.className = "search-result-item";
+    const productId = item.id || item.title || `result-${index + 1}`;
+    card.dataset.productId = productId;
+    card.innerHTML = `
+      <label class="search-result-title">
+        <input class="search-result-check" type="checkbox" value="${productId}" checked>
+        <strong>${item.title || item.id || `结果 ${index + 1}`}</strong>
+      </label>
+      <small>${[item.datetime, item.collection, item.cloud_cover !== undefined ? `云量 ${item.cloud_cover}` : ""].filter(Boolean).join(" | ")}</small>
+      <div class="download-item-progress">
+        <div class="download-item-progress-fill"></div>
+        <span>等待下载 0%</span>
+      </div>
+    `;
+    const checkbox = card.querySelector(".search-result-check");
+    checkbox.onclick = event => event.stopPropagation();
+    checkbox.onchange = updateSearchSelectionControls;
+    card.onclick = () => showSearchResultDetail(card, item);
+    list.appendChild(card);
+  });
+  $("selectAllSearchResults").onchange = (event) => {
+    document.querySelectorAll(".search-result-check").forEach(input => { input.checked = event.target.checked; });
+    updateSearchSelectionControls();
+  };
+  $("invertSearchSelection").onclick = () => {
+    document.querySelectorAll(".search-result-check").forEach(input => { input.checked = !input.checked; });
+    updateSearchSelectionControls();
+  };
+  updateSearchSelectionControls();
+}
+
+function updateSearchSelectionControls() {
+  const checkboxes = Array.from(document.querySelectorAll(".search-result-check"));
+  const selectedCount = checkboxes.filter(input => input.checked).length;
+  const allBox = $("selectAllSearchResults");
+  if (allBox) {
+    allBox.checked = checkboxes.length > 0 && selectedCount === checkboxes.length;
+    allBox.indeterminate = selectedCount > 0 && selectedCount < checkboxes.length;
+  }
+  if ($("searchSelectionCount")) $("searchSelectionCount").textContent = `已选择 ${selectedCount} / ${checkboxes.length} 个产品`;
+}
+
+function showSearchResultDetail(card, item) {
+  document.querySelectorAll(".search-result-item").forEach(node => node.classList.remove("active"));
+  card.classList.add("active");
+  if (item.bounds) map.fitBounds(item.bounds, { padding: [42, 42] });
+  card.querySelector(".search-preview")?.remove();
+  const preview = document.createElement("div");
+  preview.className = "search-preview";
+  preview.innerHTML = `
+    ${item.preview ? `<img src="${item.preview}" alt="RGB 预览影像">` : `<small>该数据源未返回在线 RGB 预览图；已显示覆盖范围。</small>`}
+    <small>${item.id || ""}</small>
+  `;
+  card.appendChild(preview);
+}
+
 function addLayerControl(layer, visible) {
   const card = document.createElement("div");
   card.className = "layer-card";
   const childHtml = (layer.children || []).map(child => `
     <div class="layer-child" data-layer-child="${child.key}">
-      <label><input type="radio" name="layer-child-${layer.key}" value="${child.key}"> ${child.name}</label>
+      <label><input type="checkbox" value="${child.key}"> ${child.name}</label>
       <a href="${child.tif}">导出 TIF</a>
     </div>
   `).join("");
@@ -420,17 +617,13 @@ function addLayerControl(layer, visible) {
   `;
   const checkbox = card.querySelector("input[type='checkbox']");
   checkbox.onchange = () => {
-    if (!checkbox.checked) {
-      card.querySelectorAll(".layer-child input").forEach(input => { input.checked = false; });
-      hideLayerFamily(layer);
-    }
+    if (checkbox.checked) toggleLayer(layer, true);
+    else hideLayerOnly(layer.key);
   };
   card.querySelectorAll(".layer-child input").forEach(input => {
     input.onchange = () => {
       const child = (layer.children || []).find(item => item.key === input.value);
       if (!child) return;
-      checkbox.checked = true;
-      hideLayerFamily(layer);
       toggleLayer({ ...layer, ...child, children: [] }, input.checked);
     };
   });
@@ -454,6 +647,14 @@ function hideLayerFamily(layer) {
   if (Object.keys(state.overlays).length === 0) $("legend").classList.add("hidden");
 }
 
+function hideLayerOnly(key) {
+  if (state.overlays[key]) {
+    map.removeLayer(state.overlays[key]);
+    delete state.overlays[key];
+  }
+  if (Object.keys(state.overlays).length === 0) $("legend").classList.add("hidden");
+}
+
 function toggleLayer(layer, visible) {
   Object.keys(state.overlays).forEach((key) => {
     if ((layer.children || []).some(child => child.key === key) && !visible) {
@@ -467,7 +668,7 @@ function toggleLayer(layer, visible) {
     if (Object.keys(state.overlays).length === 0) $("legend").classList.add("hidden");
     return;
   }
-  const overlay = L.imageOverlay(layerPngUrl(layer) + `&t=${Date.now()}`, layer.bounds, { opacity: 0.72, interactive: false });
+  const overlay = L.imageOverlay(layerPngUrl(layer) + `&t=${Date.now()}`, layer.bounds, { opacity: 1, interactive: false });
   overlay.addTo(map);
   state.overlays[layer.key] = overlay;
   updateLegend(layer);
@@ -481,9 +682,24 @@ function layerPngUrl(layer) {
 }
 
 function refreshVisibleLayer(layerKey) {
-  const layer = state.layers.find(item => item.key === layerKey);
+  const layer = findLayerByKey(layerKey);
   if (!layer || !state.overlays[layerKey]) return;
   toggleLayer(layer, true);
+}
+
+function findLayerByKey(layerKey) {
+  for (const layer of state.layers) {
+    if (layer.key === layerKey) return layer;
+    const child = (layer.children || []).find(item => item.key === layerKey);
+    if (child) return { ...layer, ...child, children: [] };
+  }
+  return null;
+}
+
+function currentLegendColor(layerKey, value, fallback) {
+  if (value === undefined || value === null) return fallback;
+  const overrides = state.layerColors[layerKey] || {};
+  return overrides[value] || overrides[String(value)] || fallback;
 }
 
 function updateLegend(layer) {
@@ -499,7 +715,7 @@ function updateLegend(layer) {
     }
     const value = item.value ?? item[2];
     const name = item.name ?? item[0];
-    const color = item.color ?? item[1];
+    const color = currentLegendColor(layer.key, value, item.color ?? item[1]);
     const note = item.note || "";
     const row = document.createElement("div");
     row.className = "legend-row";
@@ -511,6 +727,8 @@ function updateLegend(layer) {
       if (value === undefined || value === null) return;
       if (!state.layerColors[layer.key]) state.layerColors[layer.key] = {};
       state.layerColors[layer.key][value] = event.target.value;
+      item.color = event.target.value;
+      if (Array.isArray(item)) item[1] = event.target.value;
       refreshVisibleLayer(layer.key);
     };
     $("legendItems").appendChild(row);
