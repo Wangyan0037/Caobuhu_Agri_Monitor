@@ -304,28 +304,53 @@ function selectedSearchProductIds() {
   return checkboxes.filter(input => input.checked).map(input => input.value);
 }
 
+async function postJson(url, payload) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(payload)
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || data.ok === false) {
+    throw new Error(data.message || data.error || `请求失败：${response.status}`);
+  }
+  return data;
+}
+
 $("searchBtn").onclick = async () => {
-  setProgress(5, "正在提交检索任务");
-  await fetch("/api/search", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(downloadParams()) });
-  pollDownload();
+  try {
+    setProgress(5, "正在提交检索任务");
+    await postJson("/api/search", downloadParams());
+    pollDownload();
+  } catch (error) {
+    log(error.message || String(error));
+  }
 };
 
 $("downloadBtn").onclick = async () => {
-  const payload = downloadParams(true);
-  if (Array.isArray(payload.selected_product_ids) && !payload.selected_product_ids.length) {
-    log("请至少勾选一个需要下载的数据产品。");
-    return;
+  try {
+    const payload = downloadParams(true);
+    if (Array.isArray(payload.selected_product_ids) && !payload.selected_product_ids.length) {
+      log("请至少勾选一个需要下载的数据产品。");
+      return;
+    }
+    resetDownloadItemProgress(payload.selected_product_ids || []);
+    setProgress(5, "正在提交下载任务");
+    await postJson("/api/download", payload);
+    pollDownload();
+  } catch (error) {
+    log(error.message || String(error));
   }
-  resetDownloadItemProgress(payload.selected_product_ids || []);
-  setProgress(5, "正在提交下载任务");
-  await fetch("/api/download", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload) });
-  pollDownload();
 };
 
 $("stopDownloadBtn").onclick = async () => {
-  const res = await fetch("/api/download/stop", { method: "POST" }).then(r => r.json());
-  log(res.message || "已请求停止下载/检索");
-  pollDownload();
+  try {
+    const res = await postJson("/api/download/stop", {});
+    log(res.message || "已请求停止下载/检索");
+    pollDownload();
+  } catch (error) {
+    log(error.message || String(error));
+  }
 };
 
 async function pollDownload() {

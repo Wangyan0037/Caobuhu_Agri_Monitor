@@ -23,8 +23,19 @@ try:
 except ImportError:
     asf = None
 
+try:
+    import shapefile
+except ImportError:
+    shapefile = None
+
+try:
+    from rasterio.warp import transform_geom
+except ImportError:
+    transform_geom = None
+
 
 ASF_SEARCH_URL = "https://api.daac.asf.alaska.edu/services/search/param"
+DOWNLOAD_PROGRESS_MARKER = "__DOWNLOAD_PROGRESS_JSON__"
 SCRIPT_DIR = Path(__file__).resolve().parent
 APP_DIR = SCRIPT_DIR.parent
 load_dotenv(APP_DIR / ".env")
@@ -62,6 +73,7 @@ def parse_args():
     parser.add_argument("--polarization", default=CFG_POLARIZATION, help="ASF polarization filter.")
     parser.add_argument("--platform", default=CFG_PLATFORM, help="Platform filter, e.g. Sentinel-1A,Sentinel-1B.")
     parser.add_argument("--max-results", type=int, default=CFG_MAX_RESULTS, help="Maximum results to search.")
+    parser.add_argument("--product-ids", default="", help="Comma/space separated scene names to download from search results.")
     parser.add_argument("--username", default=CFG_EARTHDATA_USERNAME or os.getenv("EARTHDATA_USERNAME", ""), help="Earthdata username.")
     parser.add_argument("--password", default=CFG_EARTHDATA_PASSWORD or os.getenv("EARTHDATA_PASSWORD", ""), help="Earthdata password.")
     parser.add_argument("--token", default=CFG_EARTHDATA_TOKEN or os.getenv("EARTHDATA_TOKEN", ""), help="Earthdata bearer token. Preferred over username/password.")
@@ -83,6 +95,30 @@ def load_aoi(aoi_geojson):
     if not path.exists():
         raise FileNotFoundError(f"AOI file not found: {path}")
 
+    suffix = path.suffix.lower()
+    if suffix == ".shp":
+        if shapefile is None:
+            raise RuntimeError("Reading SHP requires pyshp: pip install pyshp")
+        for child_suffix in (".shx", ".dbf"):
+            child = path.with_suffix(child_suffix)
+            if not child.exists():
+                raise ValueError(f"Incomplete SHP, missing {child_suffix}: {child}")
+        reader = shapefile.Reader(str(path))
+        shapes = [shape.__geo_interface__ for shape in reader.shapes()]
+        if not shapes:
+            raise ValueError(f"AOI SHP has no features: {path}")
+        geometry = shapes[0] if len(shapes) == 1 else {"type": "GeometryCollection", "geometries": shapes}
+        prj = path.with_suffix(".prj")
+        if not prj.exists():
+            raise ValueError(f"SHP is missing .prj, cannot transform AOI to EPSG:4326: {prj}")
+        if transform_geom is None:
+            raise RuntimeError("Reading SHP projection requires rasterio, or use EPSG:4326 GeoJSON.")
+        crs = prj.read_text(encoding="utf-8", errors="ignore").strip()
+        return transform_geom(crs, "EPSG:4326", geometry)
+
+    if suffix not in {".geojson", ".json"}:
+        raise ValueError(f"Unsupported AOI format: {suffix}")
+
     with path.open("r", encoding="utf-8") as f:
         data = json.load(f)
 
@@ -90,10 +126,29 @@ def load_aoi(aoi_geojson):
         features = data.get("features", [])
         if not features:
             raise ValueError(f"AOI has no Feature: {path}")
+        if len(features) > 1:
+            return {"type": "GeometryCollection", "geometries": [feature["geometry"] for feature in features if feature.get("geometry")]}
         return features[0]["geometry"]
     if data.get("type") == "Feature":
         return data["geometry"]
     return data
+
+
+def _collect_polygon_rings(geometry):
+    if not geometry:
+        return []
+    geom_type = geometry.get("type")
+    coords = geometry.get("coordinates", [])
+    if geom_type == "Polygon":
+        return [coords[0]] if coords else []
+    if geom_type == "MultiPolygon":
+        return [poly[0] for poly in coords if poly]
+    if geom_type == "GeometryCollection":
+        rings = []
+        for child in geometry.get("geometries", []):
+            rings.extend(_collect_polygon_rings(child))
+        return rings
+    return []
 
 
 def geometry_to_wkt(geometry):
@@ -107,6 +162,15 @@ def geometry_to_wkt(geometry):
         for poly in coords:
             ring = poly[0]
             parts.append("((" + ",".join(f"{pt[0]} {pt[1]}" for pt in ring) + "))")
+        return "MULTIPOLYGON(" + ",".join(parts) + ")"
+    if geom_type == "GeometryCollection":
+        rings = _collect_polygon_rings(geometry)
+        if not rings:
+            raise ValueError("GeometryCollection has no Polygon/MultiPolygon for ASF search")
+        if len(rings) == 1:
+            ring = rings[0]
+            return "POLYGON((" + ",".join(f"{pt[0]} {pt[1]}" for pt in ring) + "))"
+        parts = ["((" + ",".join(f"{pt[0]} {pt[1]}" for pt in ring) + "))" for ring in rings]
         return "MULTIPOLYGON(" + ",".join(parts) + ")"
     raise ValueError(f"Unsupported AOI geometry type for ASF intersectsWith: {geom_type}")
 
@@ -186,7 +250,23 @@ def emit_search_results(features):
                 "preview": prop.get("browse") or prop.get("thumbnail") or "",
             }
         )
-    print("__SEARCH_RESULTS_JSON__" + json.dumps({"items": items}, ensure_ascii=False))
+    print("__SEARCH_RESULTS_JSON__" + json.dumps({"items": items}, ensure_ascii=False), flush=True)
+
+
+def emit_download_progress(product_id, percent, status):
+    payload = {
+        "id": product_id,
+        "percent": max(0, min(100, int(percent))),
+        "status": status,
+    }
+    print(DOWNLOAD_PROGRESS_MARKER + json.dumps(payload, ensure_ascii=False), flush=True)
+
+
+def parse_product_ids(raw):
+    if not raw:
+        return []
+    normalized = raw.replace(",", " ")
+    return [item.strip() for item in normalized.split() if item.strip()]
 
 
 def extract_zip(zip_path, extract_dir):
@@ -216,7 +296,7 @@ def extract_zip(zip_path, extract_dir):
     retry=retry_if_exception_type((requests.exceptions.Timeout, requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError, requests.exceptions.RequestException)),
     reraise=True,
 )
-def download_file(url, save_path, username, password, token=""):
+def download_file(url, save_path, username, password, token="", product_id=""):
     if asf is None:
         raise RuntimeError("Missing dependency: run `python -m pip install asf_search` first.")
 
@@ -234,6 +314,12 @@ def download_file(url, save_path, username, password, token=""):
         with session.get(url, stream=True, timeout=300, allow_redirects=True) as response:
             response.raise_for_status()
             total_size = int(response.headers.get("content-length", 0))
+            downloaded = 0
+            last_percent = -1
+            last_mb_emit = 0
+            fallback_total = 1024 * 1024 * 1024
+            if product_id:
+                emit_download_progress(product_id, 1, "ready")
             with part_path.open("wb") as f:
                 with tqdm(
                     total=total_size if total_size > 0 else None,
@@ -246,8 +332,23 @@ def download_file(url, save_path, username, password, token=""):
                     for chunk in response.iter_content(chunk_size=1024 * 1024):
                         if chunk:
                             f.write(chunk)
+                            downloaded += len(chunk)
                             pbar.update(len(chunk))
+                            if product_id:
+                                if total_size > 0:
+                                    percent = int(downloaded * 96 / total_size)
+                                    if percent >= last_percent + 2:
+                                        emit_download_progress(product_id, max(1, percent), "downloading")
+                                        last_percent = percent
+                                else:
+                                    downloaded_mb = downloaded // (1024 * 1024)
+                                    if downloaded_mb >= last_mb_emit + 16:
+                                        percent = min(95, max(2, int(downloaded * 96 / fallback_total)))
+                                        emit_download_progress(product_id, percent, f"downloading {downloaded_mb} MB")
+                                        last_mb_emit = downloaded_mb
     part_path.replace(save_path)
+    if product_id:
+        emit_download_progress(product_id, 98, "extracting")
     return True
 
 
@@ -332,13 +433,19 @@ def main():
     params = build_search_params(args)
     data = search_asf(params)
     features = data.get("features", [])
+    selected_scene_ids = set(parse_product_ids(args.product_ids))
+    if selected_scene_ids:
+        features = [
+            feature for feature in features
+            if (feature.get("properties", {}).get("sceneName") or feature.get("properties", {}).get("fileID") or feature.get("properties", {}).get("granuleName")) in selected_scene_ids
+        ]
 
-    print(f"[ASF检索] 检索到 {len(features)} 景 Sentinel-1 数据")
+    print(f"[ASF检索] 检索到 {len(features)} 景 Sentinel-1 数据", flush=True)
     if len(features) < args.max_results:
-        print(f"[ASF检索] 实际检索到的数据总数：{len(features)} 景")
+        print(f"[ASF检索] 实际检索到的数据总数：{len(features)} 景", flush=True)
     for i, item in enumerate(features[:5], 1):
         prop = item.get("properties", {})
-        print(f"  {i}. {prop.get('sceneName')} | {prop.get('processingLevel')} | {prop.get('polarization')} | {prop.get('startTime')}")
+        print(f"  {i}. {prop.get('sceneName')} | {prop.get('processingLevel')} | {prop.get('polarization')} | {prop.get('startTime')}", flush=True)
 
     if args.search_only:
         emit_search_results(features)
@@ -353,25 +460,36 @@ def main():
     for item in features:
         prop = item.get("properties", {})
         url = prop.get("url")
-        scene = prop.get("sceneName")
+        scene = prop.get("sceneName") or prop.get("fileID") or prop.get("granuleName")
         if not url or not scene:
             continue
 
         zip_path = output_dir / f"{scene}.zip"
         if zip_path.exists():
-            print(f"[SKIP] {zip_path.name}")
+            print(f"[SKIP] {zip_path.name}", flush=True)
             if not args.no_extract:
-                extract_zip(zip_path, args.extract_dir)
+                ok = extract_zip(zip_path, args.extract_dir)
+                emit_download_progress(scene, 100 if ok else 0, "exists_extracted" if ok else "extract_failed")
+                if not ok:
+                    failed += 1
+                    continue
+            else:
+                emit_download_progress(scene, 100, "exists")
             success += 1
             continue
 
         while True:
             try:
-                print(f"[DOWNLOADING] {scene}")
-                download_file(url, zip_path, args.username, args.password, args.token)
-                if not args.no_extract and not extract_zip(zip_path, args.extract_dir):
-                    failed += 1
-                    break
+                print(f"[DOWNLOADING] {scene}", flush=True)
+                download_file(url, zip_path, args.username, args.password, args.token, product_id=scene)
+                if not args.no_extract:
+                    ok = extract_zip(zip_path, args.extract_dir)
+                    emit_download_progress(scene, 100 if ok else 0, "done" if ok else "extract_failed")
+                    if not ok:
+                        failed += 1
+                        break
+                else:
+                    emit_download_progress(scene, 100, "done")
                 success += 1
                 break
             except Exception as exc:
@@ -387,7 +505,8 @@ def main():
                             print("[HINT] Auth page was already opened once in this run; not opening it again.")
                     wait_for_manual_authorization_once(auth_state)
                     continue
-                print(f"[FAILED] {scene}: {exc}")
+                print(f"[FAILED] {scene}: {exc}", flush=True)
+                emit_download_progress(scene, 0, "failed")
                 failed += 1
                 break
 

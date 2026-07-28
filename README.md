@@ -7,9 +7,10 @@
 - 数据下载/检索：done
 - Sentinel-2 L2A 下载：done
 - Sentinel-2 L1C 下载入口：done
-- Sentinel-1 GRD 下载：done，已改为通过 ASF 下载
+- Sentinel-1 GRD 下载：done，已改为通过 ASF 下载，支持勾选产品下载和单景进度显示
 - 本地 Sentinel-2 L2A SAFE 处理：done
 - Sentinel-1 SAR 预处理和 Sentinel-1/Sentinel-2 融合分析：待开发
+- AOI 检索范围：支持 GeoJSON/JSON/SHP，SHP 需要同名 `.shx/.dbf/.prj`
 
 ## 2. 运行前准备
 
@@ -182,12 +183,14 @@ http://127.0.0.1:5078/
 
 下载页面可设置：
 
-- AOI 区域文件或地图绘制范围
+- AOI 区域文件或地图绘制范围，支持 GeoJSON/JSON/SHP
 - 开始日期、结束日期
 - 数据类型
 - 产品名过滤
 - 最大检索数量，默认留空；留空时使用脚本默认值
 - 并发下载数量，默认 2，最大 10
+- 检索结果勾选下载，可只下载选中的产品
+- 单景下载进度显示，Sentinel-1 在 ASF 未返回文件总大小时会按已下载 MB 显示进度
 - ZIP 保存目录
 - SAFE 解压目录
 
@@ -264,7 +267,7 @@ xxx.prj
 
 - Sentinel-2 L2A 可直接进入当前本地处理流程。
 - Sentinel-2 L1C 当前支持下载，但不建议直接进入 L2A 处理流程。
-- Sentinel-1 当前支持下载和目录预留，尚未完成 SAR 预处理和融合计算。
+- Sentinel-1 当前支持下载、勾选产品下载、单景进度显示和目录预留，尚未完成 SAR 预处理和融合计算。
 - 不建议处理正在下载的同一个 SAFE 目录，可能读到半成品数据。
 - 如果下载失败并提示文件被占用，请关闭旧的 Python 进程、资源管理器预览、QGIS/ArcGIS 或其他占用程序。
 
@@ -292,6 +295,15 @@ xxx.prj
 - 是否已经完成 Earthdata 注册
 - 是否已经在 ASF 页面同意应用授权
 - 如果使用 `EARTHDATA_TOKEN`，确认 token 没有过期
+
+### Sentinel-1 下载进度一直停在 0% 或 1%
+
+处理方式：
+
+- 停止当前下载任务，并重启系统后重新下载。
+- 新版本已经为 Sentinel-1 增加单景进度输出。
+- 如果 ASF 未返回文件总大小，进度会按已下载 MB 显示，例如 `下载中 16 MB`。
+- 如果长时间没有 MB 数变化，优先检查 Earthdata 账号、网络连接和保存目录权限。
 
 ### SHP 无法定位或裁剪
 

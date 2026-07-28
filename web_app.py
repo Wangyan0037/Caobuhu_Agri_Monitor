@@ -992,7 +992,7 @@ def _start_download_job(params: dict, search_only: bool) -> None:
                 message = "正在通过 ASF / NASA Earthdata 下载 Sentinel-1 数据" if is_sentinel1 else "正在通过 Copernicus Data Space 下载 Sentinel-2 数据"
                 progress_text = "ASF 下载中" if is_sentinel1 else "下载中"
                 JOBS["download"].update({"percent": 18, "message": message, "progress_text": progress_text})
-            process = subprocess.Popen(cmd, cwd=str(script.parent), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            process = subprocess.Popen(cmd, cwd=str(script.parent), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             DOWNLOAD_RUNTIME["process"] = process
             stdout_lines = []
             if process.stdout is not None:
@@ -1066,12 +1066,25 @@ def _update_download_item_progress(line: str, item_progress: dict) -> None:
     if not product_id:
         return
     percent = max(0, min(100, int(data.get("percent") or 0)))
-    item_progress[product_id] = {"percent": percent, "status": data.get("status") or "下载中"}
+    raw_status = data.get("status") or "下载中"
+    status = {
+        "ready": "准备下载",
+        "downloading": "下载中",
+        "extracting": "解压中",
+        "done": "完成",
+        "exists": "已存在",
+        "exists_extracted": "已存在/已解压",
+        "extract_failed": "解压失败",
+        "failed": "下载失败",
+    }.get(raw_status, raw_status)
+    if isinstance(raw_status, str) and raw_status.startswith("downloading "):
+        status = "下载中 " + raw_status.replace("downloading ", "", 1)
+    item_progress[product_id] = {"percent": percent, "status": status}
     JOBS["download"]["item_progress"] = item_progress
     if item_progress:
         values = [int(item.get("percent") or 0) for item in item_progress.values()]
         JOBS["download"]["percent"] = max(18, min(99, int(sum(values) / max(len(values), 1))))
-    JOBS["download"]["progress_text"] = f"{data.get('status') or '下载中'} {percent}%"
+    JOBS["download"]["progress_text"] = f"{status} {percent}%"
 
 
 def _parse_search_results(stdout: str) -> dict:
@@ -1184,6 +1197,9 @@ def _build_s1_asf_download_cmd(params: dict, search_only: bool) -> list[str]:
         cmd.extend(["--aoi-geojson", params["aoi_path"]])
     else:
         cmd.append("--no-aoi")
+    selected_product_ids = _selected_product_ids(params)
+    if selected_product_ids:
+        cmd.extend(["--product-ids", ",".join(selected_product_ids)])
     if search_only:
         cmd.append("--search-only")
     return cmd
