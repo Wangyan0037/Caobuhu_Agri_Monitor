@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -964,6 +965,22 @@ def _safe_filename(value: str) -> str:
     return re.sub(r'[\\/:*?"<>|\s]+', "_", value).strip("_")
 
 
+def _direct_download_env() -> dict[str, str]:
+    env = os.environ.copy()
+    for key in (
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+    ):
+        env.pop(key, None)
+    return env
+
+
 def _start_download_job(params: dict, search_only: bool) -> None:
     if JOBS["download"]["status"] == "running":
         return
@@ -992,7 +1009,14 @@ def _start_download_job(params: dict, search_only: bool) -> None:
                 message = "正在通过 ASF / NASA Earthdata 下载 Sentinel-1 数据" if is_sentinel1 else "正在通过 Copernicus Data Space 下载 Sentinel-2 数据"
                 progress_text = "ASF 下载中" if is_sentinel1 else "下载中"
                 JOBS["download"].update({"percent": 18, "message": message, "progress_text": progress_text})
-            process = subprocess.Popen(cmd, cwd=str(script.parent), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            process = subprocess.Popen(
+                cmd,
+                cwd=str(script.parent),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=_direct_download_env(),
+            )
             DOWNLOAD_RUNTIME["process"] = process
             stdout_lines = []
             if process.stdout is not None:

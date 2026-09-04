@@ -40,6 +40,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 APP_DIR = SCRIPT_DIR.parent
 load_dotenv(APP_DIR / ".env")
 load_dotenv(SCRIPT_DIR / ".env")
+DIRECT_SESSION = requests.Session()
+DIRECT_SESSION.trust_env = False
 
 # =========================
 # User Config (edit here)
@@ -182,7 +184,7 @@ def geometry_to_wkt(geometry):
     reraise=True,
 )
 def search_asf(params):
-    response = requests.get(ASF_SEARCH_URL, params=params, timeout=120)
+    response = DIRECT_SESSION.get(ASF_SEARCH_URL, params=params, timeout=120)
     if response.status_code != 200:
         raise requests.exceptions.HTTPError(
             f"ASF search failed: {response.status_code} | {response.text[:1000]}",
@@ -306,6 +308,8 @@ def download_file(url, save_path, username, password, token="", product_id=""):
         part_path.unlink()
 
     with asf.ASFSession() as session:
+        session.trust_env = False
+        session.proxies.clear()
         session.headers.update({"User-Agent": "S1-ASF-Auto-Downloader/1.0"})
         if token:
             session.auth_with_token(token)

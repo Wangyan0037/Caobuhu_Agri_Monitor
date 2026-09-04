@@ -178,6 +178,8 @@ class CDSEClient:
         self.username = username or os.getenv("CDSE_USERNAME") or netrc_username
         self.password = password or os.getenv("CDSE_PASSWORD") or netrc_password
         self.token = None
+        self.session = requests.Session()
+        self.session.trust_env = False
         self.base_url = f"https://{self.IDENTITY_HOST}/auth/realms/CDSE"
         self._token_lock = threading.Lock()
         if not self.username or not self.password:
@@ -203,7 +205,7 @@ class CDSEClient:
     def login(self) -> bool:
         with self._token_lock:
             token_url = f"{self.base_url}/protocol/openid-connect/token"
-            response = requests.post(
+            response = self.session.post(
                 token_url,
                 data={
                     "grant_type": "password",
@@ -228,9 +230,9 @@ class CDSEClient:
 
     def _request_with_token_refresh(self, method: str, url: str, **kwargs) -> requests.Response:
         headers = kwargs.pop("headers", None)
-        response = requests.request(method, url, headers=self._auth_headers(headers), **kwargs)
+        response = self.session.request(method, url, headers=self._auth_headers(headers), **kwargs)
         if response.status_code == 401 and self.login():
-            response = requests.request(method, url, headers=self._auth_headers(headers), **kwargs)
+            response = self.session.request(method, url, headers=self._auth_headers(headers), **kwargs)
         return response
 
     def search_products(
